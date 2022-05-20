@@ -1,2 +1,2 @@
-# revelator-raft
+# Raftification framework
 RAFT implementation in Java
