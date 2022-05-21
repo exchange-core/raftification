@@ -289,6 +289,10 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                                 }
 
                             } else {
+
+                                // failed to apply by remote node in that case it will rewind one by one message,
+                                // until term and index will be matching with leader (meaning all previous entries are also matching
+
                                 if (nextIndex[fromNodeId] > 1) {
                                     log.debug("decrementing nextIndex[{}] to {}", fromNodeId, nextIndex[fromNodeId] - 1);
                                     nextIndex[fromNodeId]--;
@@ -401,17 +405,11 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                             if (canRetry || timeToSendHeartbeat) {
 
                                 final List<RaftLogEntry<T>> newEntries = logRepository.getEntries(nextIndexForNode, TRANSFER_ITEMS_NUM_LIMIT);
-
-                                // avoid additional request
-                                final int prevLogTerm = logRepository.getEntries(nextIndexForNode - 1, 1).stream()
-                                        .findFirst()
-                                        .map(RaftLogEntry::term)
-                                        .orElse(0);
+                                final int prevLogTerm = logRepository.findTermOfIndex(nextIndexForNode - 1);
 
                                 log.debug("node {} : nextIndexForNode={} newEntries={} prevLogTerm={}", targetNodeId, nextIndexForNode, newEntries, prevLogTerm);
 
-
-                                final CmdRaftAppendEntries appendRequest = new CmdRaftAppendEntries(
+                                final CmdRaftAppendEntries<T> appendRequest = new CmdRaftAppendEntries<>(
                                         currentTerm,
                                         currentNodeId,
                                         nextIndexForNode - 1,
@@ -530,15 +528,18 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
         */
 
         // TODO request range (up to commitIndex)
-        final List<RaftLogEntry<T>> entries = logRepository.getEntries(lastApplied + 1, Integer.MAX_VALUE);
+        final List<RaftLogEntry<T>> entriesToApply = logRepository.getEntries(lastApplied + 1, Integer.MAX_VALUE);
         int idx = 0;
 
+        log.debug("entries to apply: {}", entriesToApply);
+
         while (lastApplied < commitIndex) {
+
             lastApplied++;
 //            final RaftLogEntry<T> raftLogEntry = logRepository.getEntryOpt(lastApplied)
 //                    .orElseThrow(() -> new RuntimeException("Can not find pending entry index=" + lastApplied + " in the repository"));
 
-            final RaftLogEntry<T> raftLogEntry = entries.get(idx++);
+            final RaftLogEntry<T> raftLogEntry = entriesToApply.get(idx++);
 
             log.debug("Applying to RSM: {}", raftLogEntry);
             final S result = rsm.applyCommand(raftLogEntry.cmd());

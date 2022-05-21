@@ -46,6 +46,15 @@ public class RaftMemLogRepository<T extends RsmRequest> implements IRaftLogRepos
     }
 
     @Override
+    public int findTermOfIndex(long index) {
+        // avoid additional request
+        return getEntries(index, 1).stream()
+                .findFirst()
+                .map(RaftLogEntry::term)
+                .orElse(0);
+    }
+
+    @Override
     public long getLastLogIndex() {
         return logEntries.size(); // 0 = no records
     }

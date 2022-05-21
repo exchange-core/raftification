@@ -43,7 +43,22 @@ public interface IRaftLogRepository<T extends RsmRequest> extends AutoCloseable 
     List<RaftLogEntry<T>> getEntries(long indexFrom, int limit);
 
 
+    /**
+     * Find last known entry index in certain term inside specific interval of indexes
+     *
+     * @param indexAfter - entry should be last
+     * @param indexBeforeIncl - entry should not exceed this index
+     * @param term - term
+     * @return entry index if such entry exists, or indexAfter otherwise (even if term is unknown)
+     */
     long findLastEntryInTerm(long indexAfter, long indexBeforeIncl, int term);
+
+    /**
+     * Find term of the specific entry by index
+     * @param index - index of the entry
+     * @return term or 0 for unknown indexes
+     */
+    int findTermOfIndex(long index);
 
     /**
      * Append single entry

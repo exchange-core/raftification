@@ -76,6 +76,18 @@ public class RaftDiskLogRepository<T extends RsmRequest> implements IRaftLogRepo
     private final ByteBuffer indexWriteBuffer = ByteBuffer.allocateDirect(512 * 1024); // TODO Limit index size
 
 
+    // maps every known term to last index of entries of this term
+    // TODO load from file
+    // TODO can use binary search (both in the same array)
+    private NavigableMap<Integer, Long> termLastIndex = new TreeMap<>();
+
+    // TODO load from file
+    // TODO can use binary search (both)
+    // maps last index of each known term to its number
+    // this allows quickly
+    private NavigableMap<Long, Integer> indexToTermMap = new TreeMap<>();
+
+
     private SnapshotDescriptor lastSnapshotDescriptor = null; // todo implemnt
     private JournalDescriptor lastJournalDescriptor;
 
@@ -98,11 +110,35 @@ public class RaftDiskLogRepository<T extends RsmRequest> implements IRaftLogRepo
 
     @Override
     public long findLastEntryInTerm(long indexAfter, long indexBeforeIncl, int term) {
-        // TODO Term index
 
-        throw new UnsupportedOperationException();
+        if (term == lastLogTerm) {
+            final long lastIndexForTerm = Math.max(indexAfter, Math.min(indexBeforeIncl, lastLogTerm));
+            log.debug("findLastEntryInTerm for current term is {}", lastIndexForTerm);
+            return lastIndexForTerm;
+        }
 
-        //return 0;
+        log.debug("Using termLastIndex (term={}): {}", term, termLastIndex);
+        final Long lastIdxForTerm = termLastIndex.get(term);
+        if (lastIdxForTerm == null) {
+            log.debug("Last index not found for term {}", term);
+            return indexAfter;
+        } else {
+            final long lastIndexForTerm = Math.max(indexAfter, Math.min(indexBeforeIncl, lastIdxForTerm));
+            log.debug("findLastEntryInTerm from index is {}", lastIndexForTerm);
+            return lastIndexForTerm;
+        }
+    }
+
+    @Override
+    public int findTermOfIndex(long index) {
+
+        if (index == 0) {
+            return 0;
+        }
+
+        final Map.Entry<Long, Integer> longIntegerEntry = indexToTermMap.ceilingEntry(index);
+        log.debug("findTermOfIndex({}) -> longIntegerEntry={} lastLogTerm={}", index, longIntegerEntry, lastLogTerm);
+        return (longIntegerEntry != null) ? longIntegerEntry.getValue() : lastLogTerm;
     }
 
     @Override
@@ -128,10 +164,26 @@ public class RaftDiskLogRepository<T extends RsmRequest> implements IRaftLogRepo
         final ByteBuffer buffer = journalWriteBuffer;
 
         lastIndex++;
-        lastLogTerm = logEntry.term();
+
+        final int term = logEntry.term();
+
+        if (term < lastLogTerm) {
+            throw new IllegalStateException("TBC: appendEntry - term " + lastLogTerm + " is less than last frame " + lastLogTerm);
+        } else if (term > lastLogTerm) {
+
+            log.debug("Updating term: {} -> {}", term, lastLogTerm);
+
+            if (lastLogTerm != 0) {
+                termLastIndex.put(term, lastIndex - 1);
+                indexToTermMap.put(lastIndex - 1, term);
+            }
+
+            lastLogTerm = term;
+
+            log.info("termIndex: {}", termLastIndex);
+        }
 
         logEntry.serialize(buffer);
-
 
         if (endOfBatch || buffer.position() >= journalBufferFlushTrigger) {
 
@@ -170,17 +222,29 @@ public class RaftDiskLogRepository<T extends RsmRequest> implements IRaftLogRepo
 
                     truncateIndexRecords(removeAfter);
 
+                    if (true) { // TODO implement
+                        throw new UnsupportedOperationException("termLastIndex truncation/loading is not implemented");
+                    }
+
                     lastIndex = removeAfter;
                     lastLogTerm = getEntries(lastIndex, 1).get(0).term();
                 }
             }
 
             // adding missing records
-            final int offset = (int) (lastIndex - prevLogIndex);
-            if (offset > 0) {
-                final int lastIndex = newEntries.size();
-                for (int i = offset; i <= lastIndex; i++) {
-                    appendEntry(newEntries.get(i), i == lastIndex);
+
+            // lastIndex may change after verification - skip messages that are matching (were not removed)
+            final int skipEntries = (int) (lastIndex - prevLogIndex);
+
+            log.debug("skipEntries = {} (lastIndex={} - prevLogIndex={})", skipEntries, lastIndex, prevLogIndex);
+
+            if (skipEntries >= 0) {
+                final int size = newEntries.size();
+                log.debug("lastIndex={}", size);
+                for (int i = skipEntries; i < size; i++) {
+                    log.debug("i={} newEntries.get(i)={} eob={}", i, newEntries.get(i), i == size - 1);
+
+                    appendEntry(newEntries.get(i), i == size - 1);
                 }
             }
 
@@ -299,10 +363,8 @@ public class RaftDiskLogRepository<T extends RsmRequest> implements IRaftLogRepo
         final long startOffset = indexStartingIndex.getOne();
         final long floorIndex = indexStartingIndex.getTwo();
 
-        log.debug("1 readChannel.isOpen()={}", readChannel.isOpen());
-
         try {
-            log.debug("Reading {} - floor idx:{} offset:{}", indexFrom, floorIndex, startOffset);
+            log.debug("Reading from {} - floorIndex:{} offset:{}", indexFrom, floorIndex, startOffset);
             readChannel.position(startOffset);
             log.debug("Position ok");
         } catch (IOException ex) {
@@ -312,6 +374,8 @@ public class RaftDiskLogRepository<T extends RsmRequest> implements IRaftLogRepo
         final List<RaftLogEntry<T>> entries = new ArrayList<>();
 
         final MutableLong indexCounter = new MutableLong(floorIndex);
+        log.debug("indexCounter={}", indexCounter);
+
 
         // dont use try-catch as we dont want to close readChannel
         final InputStream is = Channels.newInputStream(readChannel);
@@ -319,23 +383,11 @@ public class RaftDiskLogRepository<T extends RsmRequest> implements IRaftLogRepo
         final DataInputStream dis = new DataInputStream(bis);
         try {
 
-            final boolean allLoaded = readCommands(dis, entries, indexCounter, indexFrom, limit);
-//            if (!allLoaded) {
-//                throw new RuntimeException("not loaded everything");
-//            }
-
-            log.debug("4 readChannel.isOpen()={}", readChannel.isOpen());
-
+            readCommands(dis, entries, indexCounter, indexFrom, limit);
             return entries;
 
         } catch (IOException ex) {
             throw new RuntimeException(ex);
-//        } finally {
-//            try {
-//                readChannel.position(0);
-//            } catch (IOException e) {
-//                log.error("Can not rewind readChannel position to 0");
-//            }
         }
     }
 
@@ -493,7 +545,7 @@ public class RaftDiskLogRepository<T extends RsmRequest> implements IRaftLogRepo
 
         while (dis.available() != 0) {
 
-            final long idx = indexCounter.incrementAndGet();
+            final long idx = indexCounter.getAndIncrement();
 
             log.debug("  idx={} available={}", idx, dis.available());
 
