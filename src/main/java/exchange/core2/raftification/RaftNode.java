@@ -271,7 +271,7 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                                 // set commitIndex = N (5.3, 5.4).
 
                                 if (matchIndex[fromNodeId] > commitIndex) {
-                                    log.debug("lastEntryInTerm({}, {}, {});", commitIndex, matchIndex[fromNodeId], currentTerm);
+                                    log.debug("lastEntryInTerm(commitIndex={}, matchIndex[{}]={}, currentTerm={});", commitIndex, fromNodeId, matchIndex[fromNodeId], currentTerm);
                                     final long lastEntryInTerm = logRepository.findLastEntryInTerm(commitIndex, matchIndex[fromNodeId], currentTerm);
 
                                     final long newCommitIndex = Math.max(
@@ -316,6 +316,7 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                         // respond after entry applied to state machine (5.3)
 
                         // adding new record into the local log
+                        log.debug("adding new record into the local log...");
                         final RaftLogEntry<T> logEntry = new RaftLogEntry<>(currentTerm, request.rsmRequest(), timeReceived);
                         final long index = logRepository.appendEntry(logEntry, true);
 

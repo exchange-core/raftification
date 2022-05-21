@@ -18,6 +18,7 @@
 package exchange.core2.raftification.demo;
 
 import exchange.core2.raftification.repository.IRaftLogRepository;
+import exchange.core2.raftification.repository.RaftDiskLogRepository;
 import exchange.core2.raftification.repository.RaftMemLogRepository;
 import exchange.core2.raftification.RaftNode;
 
@@ -29,8 +30,8 @@ public class CustomNode {
 
         final CustomRsm customRsm = new CustomRsm();
 
-        //final RaftDiskLogRepository<CustomRsmCommand> repository = new RaftDiskLogRepository<>(customRsm, thisNodeId);
-        final IRaftLogRepository<CustomRsmCommand> repository = new RaftMemLogRepository<>();
+        final RaftDiskLogRepository<CustomRsmCommand> repository = new RaftDiskLogRepository<>(customRsm, thisNodeId);
+//        final IRaftLogRepository<CustomRsmCommand> repository = new RaftMemLogRepository<>();
 
         new RaftNode<>(thisNodeId, repository, customRsm, customRsm, customRsm);
     }

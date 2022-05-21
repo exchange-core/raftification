@@ -17,9 +17,9 @@
 
 package exchange.core2.raftification.repository;
 
-import exchange.core2.raftification.messages.RsmRequest;
 import exchange.core2.raftification.RsmRequestFactory;
 import exchange.core2.raftification.messages.RaftLogEntry;
+import exchange.core2.raftification.messages.RsmRequest;
 import org.agrona.collections.MutableLong;
 import org.eclipse.collections.api.tuple.primitive.LongLongPair;
 import org.eclipse.collections.impl.tuple.primitive.PrimitiveTuples;
@@ -60,6 +60,7 @@ public class RaftDiskLogRepository<T extends RsmRequest> implements IRaftLogRepo
     // index -> position in file // TODO keep term in the index?
     private NavigableMap<Long, Long> currentIndex = new TreeMap<>(); // TODO  use ART ?
 
+    // TODO ReadWrite locks
 
     private long baseSnapshotId;
 
@@ -117,7 +118,10 @@ public class RaftDiskLogRepository<T extends RsmRequest> implements IRaftLogRepo
     @Override
     public long appendEntry(RaftLogEntry<T> logEntry, boolean endOfBatch) {
 
+        log.debug("appendEntry: eob={} {}", endOfBatch, logEntry);
+
         if (writeChannel == null) {
+            log.debug("startNewFile({})..", logEntry.timestamp());
             startNewFile(logEntry.timestamp());
         }
 
@@ -126,8 +130,6 @@ public class RaftDiskLogRepository<T extends RsmRequest> implements IRaftLogRepo
         lastIndex++;
         lastLogTerm = logEntry.term();
 
-        buffer.putLong(logEntry.timestamp()); // 8 bytes
-        buffer.putInt(logEntry.term()); // 4 bytes
         logEntry.serialize(buffer);
 
 
@@ -283,6 +285,8 @@ public class RaftDiskLogRepository<T extends RsmRequest> implements IRaftLogRepo
     @Override
     public List<RaftLogEntry<T>> getEntries(long indexFrom, int limit) {
 
+        log.debug("getEntries(from {}, limit {})", indexFrom, limit);
+
         if (indexFrom == 0L && limit == 1) {
             return List.of();
         }
@@ -294,6 +298,8 @@ public class RaftDiskLogRepository<T extends RsmRequest> implements IRaftLogRepo
         final LongLongPair indexStartingIndex = findStartingIndexPoint(indexFrom);
         final long startOffset = indexStartingIndex.getOne();
         final long floorIndex = indexStartingIndex.getTwo();
+
+        log.debug("1 readChannel.isOpen()={}", readChannel.isOpen());
 
         try {
             log.debug("Reading {} - floor idx:{} offset:{}", indexFrom, floorIndex, startOffset);
@@ -307,25 +313,29 @@ public class RaftDiskLogRepository<T extends RsmRequest> implements IRaftLogRepo
 
         final MutableLong indexCounter = new MutableLong(floorIndex);
 
-        try (final InputStream is = Channels.newInputStream(readChannel);
-             final BufferedInputStream bis = new BufferedInputStream(is);
-             final DataInputStream dis = new DataInputStream(bis)) {
+        // dont use try-catch as we dont want to close readChannel
+        final InputStream is = Channels.newInputStream(readChannel);
+        final BufferedInputStream bis = new BufferedInputStream(is);
+        final DataInputStream dis = new DataInputStream(bis);
+        try {
 
             final boolean allLoaded = readCommands(dis, entries, indexCounter, indexFrom, limit);
-            if (!allLoaded) {
-                throw new RuntimeException("not loaded everything");
-            }
+//            if (!allLoaded) {
+//                throw new RuntimeException("not loaded everything");
+//            }
+
+            log.debug("4 readChannel.isOpen()={}", readChannel.isOpen());
 
             return entries;
 
         } catch (IOException ex) {
             throw new RuntimeException(ex);
-        } finally {
-            try {
-                readChannel.position(0);
-            } catch (IOException e) {
-                log.error("Can not rewind readChannel position to 0");
-            }
+//        } finally {
+//            try {
+//                readChannel.position(0);
+//            } catch (IOException e) {
+//                log.error("Can not rewind readChannel position to 0");
+//            }
         }
     }
 
@@ -376,11 +386,11 @@ public class RaftDiskLogRepository<T extends RsmRequest> implements IRaftLogRepo
 
 
     private Path resolveJournalPath(int partitionId, long snapshotId) {
-        return folder.resolve(String.format("%s_log_%d_%04X.ecrl", exchangeId, snapshotId, partitionId));
+        return folder.resolve(String.format("%s_%d_%04X.ecrl", exchangeId, snapshotId, partitionId));
     }
 
     private Path resolveIndexPath(int partitionId, long snapshotId) {
-        return folder.resolve(String.format("%s_idx_%d_%04X.ridx", exchangeId, snapshotId, partitionId));
+        return folder.resolve(String.format("%s_%d_%04X.ridx", exchangeId, snapshotId, partitionId));
     }
 
     private void flushBufferSync(final boolean forceStartNextFile,
@@ -388,7 +398,7 @@ public class RaftDiskLogRepository<T extends RsmRequest> implements IRaftLogRepo
 
         try {
 
-//        log.debug("Flushing buffer position={}", buffer.position());
+            log.debug("Flushing buffer forceStartNextFile={}, timestampNs={} ...", forceStartNextFile, timestampNs);
 
             // uncompressed write for single messages or small batches
             writtenBytes += journalWriteBuffer.position();
@@ -478,9 +488,14 @@ public class RaftDiskLogRepository<T extends RsmRequest> implements IRaftLogRepo
                                  final long indexFrom,
                                  final int limit) throws IOException {
 
+
+        log.debug("Reading commands: indexCounter={} indexFrom={} limit={}", indexCounter, indexFrom, limit);
+
         while (dis.available() != 0) {
 
             final long idx = indexCounter.incrementAndGet();
+
+            log.debug("  idx={} available={}", idx, dis.available());
 
             final RaftLogEntry<T> logEntry = RaftLogEntry.create(dis, rsmRequestFactory);
 
@@ -489,6 +504,7 @@ public class RaftDiskLogRepository<T extends RsmRequest> implements IRaftLogRepo
                 collector.add(logEntry);
             }
 
+            log.debug("collector.size()={} limit={}", collector.size(), limit);
             if (collector.size() == limit) {
                 return true;
             }
