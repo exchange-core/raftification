@@ -28,6 +28,7 @@ import java.net.InetAddress;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
 
@@ -101,6 +102,8 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
     private long lastHeartBeatReceivedNs = System.nanoTime();
     private long electionEndNs = System.nanoTime();
 
+    private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
+
 
     public RaftNode(int thisNodeId,
                     IRaftLogRepository<T> logRepository,
@@ -124,9 +127,12 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
             public RpcResponse handleNodeRequest(int fromNodeId, RpcRequest req) {
                 log.debug("INCOMING REQ {} >>> {}", fromNodeId, req);
 
-                if (req instanceof CmdRaftVoteRequest voteRequest) {
+                try {
 
-                    synchronized (this) {
+                    lock.writeLock().lock();
+
+                    if (req instanceof CmdRaftVoteRequest voteRequest) {
+
                     /* Receiver implementation:
                     1. Reply false if term < currentTerm (§5.1)
                     2. If votedFor is null or candidateId, and candidate’s log is at
@@ -155,12 +161,10 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                         votedFor = fromNodeId;
 
                         return new CmdRaftVoteResponse(currentTerm, true);
+
                     }
+                    if (req instanceof CmdRaftAppendEntries cmd) {
 
-                }
-                if (req instanceof CmdRaftAppendEntries cmd) {
-
-                    synchronized (this) {
 
                         // 1. Reply false if term < currentTerm
                         if (cmd.term() < currentTerm) {
@@ -231,6 +235,9 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
 
                         return new CmdRaftAppendEntriesResponse(currentTerm, true);
                     }
+
+                } finally {
+                    lock.writeLock().unlock();
                 }
 
                 return null;
@@ -246,14 +253,15 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                 given term, on a first-come-first-served basis
                 (note: Section 5.4 adds an additional restriction on votes) */
 
-                if (resp instanceof final CmdRaftVoteResponse voteResponse) {
-                    synchronized (this) {
+                try {
+
+                    lock.writeLock().lock();
+
+                    if (resp instanceof final CmdRaftVoteResponse voteResponse) {
                         if (currentState == RaftNodeState.CANDIDATE && voteResponse.voteGranted() && voteResponse.term() == currentTerm) {
                             switchToLeader();
                         }
-                    }
-                } else if (resp instanceof final CmdRaftAppendEntriesResponse appendResponse) {
-                    synchronized (this) {
+                    } else if (resp instanceof final CmdRaftAppendEntriesResponse appendResponse) {
                         if (correlationId == correlationIds[fromNodeId]) {
 
 
@@ -302,8 +310,9 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                             }
                         }
                     }
+                } finally {
+                    lock.writeLock().unlock();
                 }
-
             }
 
 
@@ -313,7 +322,9 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                                                                 final long correlationId,
                                                                 final long timeReceived,
                                                                 final CustomCommandRequest<T> request) {
-                synchronized (this) {
+                try {
+
+                    lock.writeLock().lock();
 
                     if (currentState == RaftNodeState.LEADER) {
                         // If command received from client: append entry to local log,
@@ -325,13 +336,18 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                         final long index = logRepository.appendEntry(logEntry, true);
 
                         // remember client request (TODO !! on batch migration - should refer to the last record)
-                        clientResponsesMap.put(index, new ClientAddress(address, port, correlationId));
+                        final ClientAddress clientAddress = new ClientAddress(address, port, correlationId);
+                        clientResponsesMap.put(index, clientAddress);
+                        log.debug("Saving {} for index {} to reply", index, clientAddress);
 
                     } else {
                         log.debug("Redirecting client to leader nodeId={}", votedFor);
                         // inform client about different leader
                         return new CustomCommandResponse<>(respFactory.emptyResponse(), votedFor, false);
                     }
+
+                } finally {
+                    lock.writeLock().unlock();
                 }
 
                 return null;
@@ -359,7 +375,9 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
 
             while (true) {
 
-                synchronized (this) {
+                try {
+
+                    lock.writeLock().lock();
 
                     if (currentState == RaftNodeState.FOLLOWER) {
 
@@ -387,14 +405,17 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                     }
 
 
+                } finally {
+                    lock.writeLock().unlock();
                 }
 
-                Thread.sleep(100);
+                Thread.sleep(10);
             }
-
 
         } catch (InterruptedException e) {
             e.printStackTrace();
+        } finally {
+            log.debug("Worker thread finished");
         }
 
 
@@ -465,9 +486,16 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
     }
 
 
-    private synchronized void resetFollowerAppendTimer() {
+    private void resetFollowerAppendTimer() {
 //        logger.debug("reset append timer");
-        lastHeartBeatReceivedNs = System.nanoTime();
+        try {
+            lock.writeLock().lock();
+
+            lastHeartBeatReceivedNs = System.nanoTime();
+
+        } finally {
+            lock.writeLock().unlock();
+        }
     }
 
     /**
@@ -480,42 +508,46 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
      * (b) another server establishes itself as leader, or
      * (c) a period of time goes by with no winner.
      */
-    private synchronized void appendTimeout() {
+    private void appendTimeout() {
+        try {
+            lock.writeLock().lock();
+            // TODO double-check last receiving time
 
-        // TODO double-check last receiving time
+            currentState = RaftNodeState.CANDIDATE;
 
-        currentState = RaftNodeState.CANDIDATE;
+            // On conversion to candidate, start election:
+            // - Increment currentTerm
+            // - Vote for self
+            // - Reset election timer
+            // - Send RequestVote RPCs to all other servers
+            currentTerm++;
 
-        // On conversion to candidate, start election:
-        // - Increment currentTerm
-        // - Vote for self
-        // - Reset election timer
-        // - Send RequestVote RPCs to all other servers
-        currentTerm++;
+            log.info("heartbeat timeout - switching to CANDIDATE, term={}", currentTerm);
 
-        log.info("heartbeat timeout - switching to CANDIDATE, term={}", currentTerm);
+            votedFor = currentNodeId;
 
-        votedFor = currentNodeId;
+            final int prevLogTerm = logRepository.getLastLogTerm();
+            final long prevLogIndex = logRepository.getLastLogIndex();
 
-        final int prevLogTerm = logRepository.getLastLogTerm();
-        final long prevLogIndex = logRepository.getLastLogIndex();
+            final CmdRaftVoteRequest voteReq = new CmdRaftVoteRequest(
+                    currentTerm,
+                    currentNodeId,
+                    prevLogIndex,
+                    prevLogTerm);
 
-        final CmdRaftVoteRequest voteReq = new CmdRaftVoteRequest(
-                currentTerm,
-                currentNodeId,
-                prevLogIndex,
-                prevLogTerm);
+            rpcService.callRpcAsync(voteReq, otherNodes[0]);
+            rpcService.callRpcAsync(voteReq, otherNodes[1]);
 
-        rpcService.callRpcAsync(voteReq, otherNodes[0]);
-        rpcService.callRpcAsync(voteReq, otherNodes[1]);
-
-        final int timeoutMs = ELECTION_TIMEOUT_MIN_MS + (int) (Math.random() * (ELECTION_TIMEOUT_MAX_MS - ELECTION_TIMEOUT_MIN_MS));
-        log.debug("ElectionTimeout: {}ms", timeoutMs);
-        electionEndNs = System.nanoTime() + timeoutMs * 1_000_000L;
+            final int timeoutMs = ELECTION_TIMEOUT_MIN_MS + (int) (Math.random() * (ELECTION_TIMEOUT_MAX_MS - ELECTION_TIMEOUT_MIN_MS));
+            log.debug("ElectionTimeout: {}ms", timeoutMs);
+            electionEndNs = System.nanoTime() + timeoutMs * 1_000_000L;
+        } finally {
+            lock.writeLock().unlock();
+        }
     }
 
     private void switchToLeader() {
-        log.info("Becoming a LEADER!");
+        log.info("============= Becoming a LEADER! ===============");
         currentState = RaftNodeState.LEADER;
 
         // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
@@ -552,13 +584,20 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
             if (currentState == RaftNodeState.LEADER) {
 
                 // respond to client that batch has applied
-                final ClientAddress c = clientResponsesMap.get(lastApplied);
-                log.debug("Replying to client lastApplied={} c={}", lastApplied, c);
-                rpcService.respondToClient(
-                        c.address,
-                        c.port,
-                        c.correlationId,
-                        new CustomCommandResponse<>(result, currentNodeId, true));
+                final ClientAddress clientAddress = clientResponsesMap.get(lastApplied);
+
+                if (clientAddress != null) {
+
+                    log.debug("Replying to client lastApplied={} c={}", lastApplied, clientAddress);
+
+                    rpcService.respondToClient(
+                            clientAddress.address,
+                            clientAddress.port,
+                            clientAddress.correlationId,
+                            new CustomCommandResponse<>(result, currentNodeId, true));
+                } else {
+                    log.warn("Can not reply client - unknown requestor for lastApplied={}", lastApplied);
+                }
             }
 
         }

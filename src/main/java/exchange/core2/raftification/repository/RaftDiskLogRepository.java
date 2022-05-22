@@ -83,7 +83,7 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
     // TODO load from file
     // TODO can use binary search (both)
     // maps last index of each known term to its number
-    // this allows quickly
+    // this is how leader can quickly resolve term of previous record known to follower
     private NavigableMap<Long, Integer> indexToTermMap = new TreeMap<>();
 
 
@@ -172,11 +172,13 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
             throw new IllegalStateException("TBC: appendEntry - term " + lastLogTerm + " is less than last frame " + lastLogTerm);
         } else if (term > lastLogTerm) {
 
-            log.debug("Updating term: {} -> {}", term, lastLogTerm);
+            log.debug("Updating term: {} -> {}", lastLogTerm, term);
 
             if (lastLogTerm != 0) {
                 termLastIndex.put(term, lastIndex - 1);
-                indexToTermMap.put(lastIndex - 1, term);
+
+                // saving previous term
+                indexToTermMap.put(lastIndex - 1, lastLogTerm);
 
                 try {
 
@@ -207,6 +209,7 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
             flushBufferSync(false, logEntry.timestamp());
         }
 
+        log.debug("assigned index {}", lastIndex);
         return lastIndex;
     }
 
