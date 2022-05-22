@@ -29,8 +29,14 @@ import java.util.List;
  */
 public interface IRaftLogRepository<T extends RsmRequest> extends AutoCloseable {
 
+    /**
+     * @return last entry index (starting from 1), or 0 if there are no entries.
+     */
     long getLastLogIndex();
 
+    /**
+     * @return term of last entry, or 0 if there are no entries.
+     */
     int getLastLogTerm();
 
     /**
@@ -46,15 +52,16 @@ public interface IRaftLogRepository<T extends RsmRequest> extends AutoCloseable 
     /**
      * Find last known entry index in certain term inside specific interval of indexes
      *
-     * @param indexAfter - entry should be last
+     * @param indexAfter      - entry should be last
      * @param indexBeforeIncl - entry should not exceed this index
-     * @param term - term
+     * @param term            - term
      * @return entry index if such entry exists, or indexAfter otherwise (even if term is unknown)
      */
     long findLastEntryInTerm(long indexAfter, long indexBeforeIncl, int term);
 
     /**
      * Find term of the specific entry by index
+     *
      * @param index - index of the entry
      * @return term or 0 for unknown indexes
      */
@@ -70,6 +77,13 @@ public interface IRaftLogRepository<T extends RsmRequest> extends AutoCloseable 
     long appendEntry(RaftLogEntry<T> logEntry, boolean endOfBatch);
 
 
+    /**
+     * Append multiple entries from leader to follower log.
+     * Override entries that are different.
+     *
+     * @param newEntries   list of new entries
+     * @param prevLogIndex index of entry after which provided newEntries should be attached
+     */
     void appendOrOverride(List<RaftLogEntry<T>> newEntries, long prevLogIndex);
 
 

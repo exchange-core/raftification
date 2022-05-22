@@ -380,64 +380,16 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
 
                     if (currentState == RaftNodeState.LEADER) {
 
-                        // If last log index >= nextIndex for a follower: send AppendEntries RPC with log entries starting at nextIndex
-                        // If successful: update nextIndex and matchIndex for follower (5.3)
-                        // If AppendEntries fails because of log inconsistency: decrement nextIndex and retry (5.3)
-
-
                         final long prevLogIndex = logRepository.getLastLogIndex();
-
-                        Arrays.stream(otherNodes).forEach(targetNodeId -> {
-
-                            final long nextIndexForNode = nextIndex[targetNodeId];
-
-                            final long t = System.nanoTime();
-                            final boolean timeToSendHeartbeat = t > lastHeartBeatSentNs[targetNodeId] + HEARTBEAT_LEADER_RATE_MS * 1_000_000L;
-
-                            //log.debug("timeToSendHeartbeat={}",timeToSendHeartbeat);
-
-                            // have records and did not send batch recently
-                            final boolean canRetry = prevLogIndex >= nextIndexForNode
-                                    && (correlationIds[targetNodeId] == 0L || t > timeSent[targetNodeId] + APPEND_REPLY_TIMEOUT_MAX_MS * 1_000_000L);
-
-                            //log.debug("canRetry={}",canRetry);
-
-                            if (canRetry || timeToSendHeartbeat) {
-
-                                final List<RaftLogEntry<T>> newEntries = logRepository.getEntries(nextIndexForNode, TRANSFER_ITEMS_NUM_LIMIT);
-                                final int prevLogTerm = logRepository.findTermOfIndex(nextIndexForNode - 1);
-
-                                log.debug("node {} : nextIndexForNode={} newEntries={} prevLogTerm={}", targetNodeId, nextIndexForNode, newEntries, prevLogTerm);
-
-                                final CmdRaftAppendEntries<T> appendRequest = new CmdRaftAppendEntries<>(
-                                        currentTerm,
-                                        currentNodeId,
-                                        nextIndexForNode - 1,
-                                        prevLogTerm,
-                                        newEntries,
-                                        commitIndex);
-
-                                final long corrId = rpcService.callRpcAsync(appendRequest, targetNodeId);
-                                log.info("Sent {} entries to {}: {} corrId={}", newEntries.size(), targetNodeId, appendRequest, corrId);
-
-                                if (!newEntries.isEmpty()) {
-                                    correlationIds[targetNodeId] = corrId;
-                                    timeSent[targetNodeId] = System.nanoTime();
-                                    sentUpTo[targetNodeId] = nextIndexForNode - 1 + newEntries.size();
-                                    log.debug("correlationIds[{}]={}", targetNodeId, corrId);
-                                    log.debug("set sentUpTo[{}]={}", targetNodeId, sentUpTo[targetNodeId]);
-                                }
-
-                                lastHeartBeatSentNs[targetNodeId] = System.nanoTime();
-                            }
-                        });
-
+                        Arrays.stream(otherNodes)
+                                .forEach(targetNodeId ->
+                                        notifyFollowerAsLeader(prevLogIndex, targetNodeId));
                     }
 
 
                 }
 
-                Thread.sleep(10);
+                Thread.sleep(100);
             }
 
 
@@ -446,6 +398,59 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
         }
 
 
+    }
+
+    private void notifyFollowerAsLeader(final long prevLogIndex, final int targetNodeId) {
+
+        // If last log index >= nextIndex for a follower: send AppendEntries RPC with log entries starting at nextIndex
+        // If successful: update nextIndex and matchIndex for follower (5.3)
+        // If AppendEntries fails because of log inconsistency: decrement nextIndex and retry (5.3)
+
+        final long nextIndexForNode = nextIndex[targetNodeId];
+
+        final long t = System.nanoTime();
+        final boolean shouldSendHeartbeat = t > lastHeartBeatSentNs[targetNodeId] + HEARTBEAT_LEADER_RATE_MS * 1_000_000L;
+
+        //log.debug("shouldSendHeartbeat={}",shouldSendHeartbeat);
+
+        // have new records for the follower and did not send batch recently
+        final boolean canRetry = prevLogIndex >= nextIndexForNode
+                && (correlationIds[targetNodeId] == 0L || t > timeSent[targetNodeId] + APPEND_REPLY_TIMEOUT_MAX_MS * 1_000_000L);
+
+        //log.debug("canRetry={}",canRetry);
+
+        if (canRetry || shouldSendHeartbeat) {
+
+            log.debug("---------- NOTIFY NODE={} canRetry={} shouldSendHeartbeat={} ----------", targetNodeId, canRetry, shouldSendHeartbeat);
+
+            final List<RaftLogEntry<T>> newEntries = logRepository.getEntries(nextIndexForNode, TRANSFER_ITEMS_NUM_LIMIT);
+            final int prevLogTerm = logRepository.findTermOfIndex(nextIndexForNode - 1);
+
+            newEntries.forEach(entry -> log.debug("  new entry to send to {}: {}", targetNodeId, entry));
+
+            log.debug("node {} : nextIndexForNode={} prevLogTerm={}", targetNodeId, nextIndexForNode, prevLogTerm);
+
+            final CmdRaftAppendEntries<T> appendRequest = new CmdRaftAppendEntries<>(
+                    currentTerm,
+                    currentNodeId,
+                    nextIndexForNode - 1,
+                    prevLogTerm,
+                    newEntries,
+                    commitIndex);
+
+            final long corrId = rpcService.callRpcAsync(appendRequest, targetNodeId);
+            log.info("Sent {} entries to {}: {} corrId={}", newEntries.size(), targetNodeId, appendRequest, corrId);
+
+            if (!newEntries.isEmpty()) {
+                correlationIds[targetNodeId] = corrId;
+                timeSent[targetNodeId] = System.nanoTime();
+                sentUpTo[targetNodeId] = nextIndexForNode - 1 + newEntries.size();
+                log.debug("correlationIds[{}]={}", targetNodeId, corrId);
+                log.debug("set sentUpTo[{}]={}", targetNodeId, sentUpTo[targetNodeId]);
+            }
+
+            lastHeartBeatSentNs[targetNodeId] = System.nanoTime();
+        }
     }
 
 

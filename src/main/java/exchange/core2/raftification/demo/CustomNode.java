@@ -17,10 +17,11 @@
 
 package exchange.core2.raftification.demo;
 
-import exchange.core2.raftification.repository.IRaftLogRepository;
-import exchange.core2.raftification.repository.RaftDiskLogRepository;
-import exchange.core2.raftification.repository.RaftMemLogRepository;
 import exchange.core2.raftification.RaftNode;
+import exchange.core2.raftification.repository.RaftDiskLogConfig;
+import exchange.core2.raftification.repository.RaftDiskLogRepository;
+
+import java.nio.file.Path;
 
 public class CustomNode {
 
@@ -30,7 +31,11 @@ public class CustomNode {
 
         final CustomRsm customRsm = new CustomRsm();
 
-        final RaftDiskLogRepository<CustomRsmCommand> repository = new RaftDiskLogRepository<>(customRsm, thisNodeId);
+        final Path folder = Path.of("./raftlogs/node" + thisNodeId);
+
+        final RaftDiskLogConfig raftDiskLogConfig = new RaftDiskLogConfig(folder, "EC2RT");
+
+        final RaftDiskLogRepository<CustomRsmCommand> repository = new RaftDiskLogRepository<>(customRsm, raftDiskLogConfig);
 //        final IRaftLogRepository<CustomRsmCommand> repository = new RaftMemLogRepository<>();
 
         new RaftNode<>(thisNodeId, repository, customRsm, customRsm, customRsm);
