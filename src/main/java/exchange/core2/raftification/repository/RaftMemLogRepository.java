@@ -121,6 +121,26 @@ public class RaftMemLogRepository<T extends RsmRequest> implements IRaftLogRepos
         }
     }
 
+    @Override
+    public int getCurrentTerm() {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setCurrentTerm(int term) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public int getVotedFor() {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setVotedFor(int nodeId) {
+        throw new UnsupportedOperationException();
+    }
+
     // 1
     @Override
     public List<RaftLogEntry<T>> getEntries(long indexFrom, int limit) {

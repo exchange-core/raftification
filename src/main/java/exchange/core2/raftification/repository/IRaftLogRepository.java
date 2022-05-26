@@ -87,4 +87,17 @@ public interface IRaftLogRepository<T extends RsmRequest> extends AutoCloseable 
     void appendOrOverride(List<RaftLogEntry<T>> newEntries, long prevLogIndex);
 
 
+    // latest term server has seen (initialized to 0 on first boot, increases monotonically)
+
+    int getCurrentTerm();
+
+    void setCurrentTerm(int term);
+
+
+    // candidateId that received vote in current term (or -1 if none)
+
+    int getVotedFor();
+
+    void setVotedFor(int nodeId);
+
 }

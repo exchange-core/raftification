@@ -44,22 +44,16 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
 
     /* **** Persistent state on all servers: (Updated on stable storage before responding to RPCs) */
 
-    // latest term server has seen (initialized to 0 on first boot, increases monotonically)
-    private int currentTerm = 0;
-
-    // candidateId that received vote in current term (or -1 if none)
-    private int votedFor = -1;
-
     // log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1)
     private final IRaftLogRepository<T> logRepository;
 
     /* **** Volatile state on all servers: */
 
     // index of the highest log entry known to be committed (initialized to 0, increases monotonically)
-    private long commitIndex = 0;
+    private long commitIndex = 0; // TODO initialize from Repository (or statemachine?)
 
     // index of the highest log entry applied to state machine (initialized to 0, increases monotonically)
-    private long lastApplied = 0;
+    private long lastApplied = 0; // TODO initialize from Repository (or statemachine?)
 
     private RaftNodeState currentState = RaftNodeState.FOLLOWER;
 
@@ -138,38 +132,38 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                     2. If votedFor is null or candidateId, and candidate’s log is at
                     least as up-to-date as receiver’s log, grant vote (5.2, 5.4) */
 
-                        if (voteRequest.term() < currentTerm) {
+                        if (voteRequest.term() < logRepository.getCurrentTerm()) {
                             log.debug("Reject vote for {} - term is old", fromNodeId);
-                            return new CmdRaftVoteResponse(currentTerm, false);
+                            return new CmdRaftVoteResponse(logRepository.getCurrentTerm(), false);
                         }
 
-                        if (voteRequest.term() > currentTerm) {
+                        if (voteRequest.term() > logRepository.getCurrentTerm()) {
                             log.debug("received newer term {} with vote request", voteRequest.term());
-                            currentTerm = voteRequest.term();
-                            votedFor = -1; // never voted in newer term
+                            logRepository.setCurrentTerm(voteRequest.term());
+                            logRepository.setVotedFor(-1); // never voted in newer term
                             switchToFollower();
                             resetFollowerAppendTimer();
                         }
 
-                        if (votedFor != -1) {
+                        if (logRepository.getVotedFor() != -1) {
 //                        if (votedFor != -1 && votedFor != currentNodeId) {
-                            log.debug("Reject vote for {} - already voted for {}", fromNodeId, votedFor);
-                            return new CmdRaftVoteResponse(currentTerm, false);
+                            log.debug("Reject vote for {} - already voted for {}", fromNodeId, logRepository.getVotedFor());
+                            return new CmdRaftVoteResponse(logRepository.getCurrentTerm(), false);
                         }
 
                         log.debug("VOTE GRANTED for {}", fromNodeId);
-                        votedFor = fromNodeId;
+                        logRepository.setVotedFor(fromNodeId);
 
-                        return new CmdRaftVoteResponse(currentTerm, true);
+                        return new CmdRaftVoteResponse(logRepository.getCurrentTerm(), true);
 
                     }
                     if (req instanceof CmdRaftAppendEntries cmd) {
 
 
                         // 1. Reply false if term < currentTerm
-                        if (cmd.term() < currentTerm) {
-                            log.debug("Ignoring leader with older term {} (current={}", cmd.term(), currentTerm);
-                            return new CmdRaftAppendEntriesResponse(currentTerm, false);
+                        if (cmd.term() < logRepository.getCurrentTerm()) {
+                            log.debug("Ignoring leader with older term {} (current={}", cmd.term(), logRepository.getCurrentTerm());
+                            return new CmdRaftAppendEntriesResponse(logRepository.getCurrentTerm(), false);
                         }
 
                         if (currentState == RaftNodeState.CANDIDATE) {
@@ -184,21 +178,21 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                             switchToFollower();
                         }
 
-                        if (cmd.term() > currentTerm) {
-                            log.info("Update term {}->{}", currentTerm, cmd.term());
-                            currentTerm = cmd.term();
+                        if (cmd.term() > logRepository.getCurrentTerm()) {
+                            log.info("Update term {}->{}", logRepository.getCurrentTerm(), cmd.term());
+                            logRepository.setCurrentTerm(cmd.term());
                             switchToFollower();
                         }
 
-                        if (currentState == RaftNodeState.FOLLOWER && votedFor != cmd.leaderId()) {
+                        if (currentState == RaftNodeState.FOLLOWER && logRepository.getVotedFor() != cmd.leaderId()) {
                             log.info("Changed votedFor to {}", cmd.leaderId());
-                            votedFor = cmd.leaderId(); // to inform client who accessing followers
+                            logRepository.setVotedFor(cmd.leaderId()); // to inform client who accessing followers
                         }
 
                         resetFollowerAppendTimer();
 
                         if (cmd.entries().isEmpty()) {
-                            return new CmdRaftAppendEntriesResponse(currentTerm, true);
+                            return new CmdRaftAppendEntriesResponse(logRepository.getCurrentTerm(), true);
                         }
 
                         log.debug("Adding new records into the log...");
@@ -207,13 +201,13 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                         final long prevLogIndex = cmd.prevLogIndex();
                         if (prevLogIndex > 0 && prevLogIndex != logRepository.getLastLogIndex()) {
                             log.warn("Reject - log doesn’t contain an entry at prevLogIndex={} (last is {}))", prevLogIndex, logRepository.getLastLogIndex());
-                            return new CmdRaftAppendEntriesResponse(currentTerm, false);
+                            return new CmdRaftAppendEntriesResponse(logRepository.getCurrentTerm(), false);
                         }
 
                         final int lastLogTerm = logRepository.getLastLogTerm();
                         if (cmd.prevLogTerm() != lastLogTerm) {
-                            log.warn("Reject - log last record has different term {}, expected prevLogTerm={}", lastLogTerm, cmd.prevLogTerm());
-                            return new CmdRaftAppendEntriesResponse(currentTerm, false);
+                            log.warn("Reject - last known log record has term {}, leader provided prevLogTerm={}", lastLogTerm, cmd.prevLogTerm());
+                            return new CmdRaftAppendEntriesResponse(logRepository.getCurrentTerm(), false);
                         }
 
                         // 3. If an existing entry conflicts with a new one (same index but different terms),
@@ -231,9 +225,9 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                         }
 
                         // todo can do in different thread
-                        applyPendingEntriesToStateMachine();
+//                        applyPendingEntriesToStateMachine();
 
-                        return new CmdRaftAppendEntriesResponse(currentTerm, true);
+                        return new CmdRaftAppendEntriesResponse(logRepository.getCurrentTerm(), true);
                     }
 
                 } finally {
@@ -257,6 +251,8 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
 
                     lock.writeLock().lock();
 
+                    final int currentTerm = logRepository.getCurrentTerm();
+
                     if (resp instanceof final CmdRaftVoteResponse voteResponse) {
                         if (currentState == RaftNodeState.CANDIDATE && voteResponse.voteGranted() && voteResponse.term() == currentTerm) {
                             switchToLeader();
@@ -279,7 +275,7 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                                 // set commitIndex = N (5.3, 5.4).
 
                                 if (matchIndex[fromNodeId] > commitIndex) {
-                                    log.debug("lastEntryInTerm(commitIndex={}, matchIndex[{}]={}, currentTerm={});", commitIndex, fromNodeId, matchIndex[fromNodeId], currentTerm);
+                                    log.debug("requesting lastEntryInTerm(commitIndex={}, matchIndex[{}]={}, currentTerm={});", commitIndex, fromNodeId, matchIndex[fromNodeId], currentTerm);
                                     final long lastEntryInTerm = logRepository.findLastEntryInTerm(commitIndex, matchIndex[fromNodeId], currentTerm);
 
                                     final long newCommitIndex = Math.max(
@@ -293,7 +289,7 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                                     commitIndex = newCommitIndex;
 
                                     // TODO another thread
-                                    applyPendingEntriesToStateMachine();
+                                    // applyPendingEntriesToStateMachine();
                                 }
 
                             } else {
@@ -332,7 +328,7 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
 
                         // adding new record into the local log
                         log.debug("adding new record into the local log...");
-                        final RaftLogEntry<T> logEntry = new RaftLogEntry<>(currentTerm, request.rsmRequest(), timeReceived);
+                        final RaftLogEntry<T> logEntry = new RaftLogEntry<>(logRepository.getCurrentTerm(), request.rsmRequest(), timeReceived);
                         final long index = logRepository.appendEntry(logEntry, true);
 
                         // remember client request (TODO !! on batch migration - should refer to the last record)
@@ -341,9 +337,9 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                         log.debug("Saving {} for index {} to reply", index, clientAddress);
 
                     } else {
-                        log.debug("Redirecting client to leader nodeId={}", votedFor);
+                        log.debug("Redirecting client to leader nodeId={}", logRepository.getVotedFor());
                         // inform client about different leader
-                        return new CustomCommandResponse<>(respFactory.emptyResponse(), votedFor, false);
+                        return new CustomCommandResponse<>(respFactory.emptyResponse(), logRepository.getVotedFor(), false);
                     }
 
                 } finally {
@@ -398,12 +394,15 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
 
                     if (currentState == RaftNodeState.LEADER) {
 
+                        // TODO why timer is not triggered when leader alone??
+
                         final long prevLogIndex = logRepository.getLastLogIndex();
                         Arrays.stream(otherNodes)
                                 .forEach(targetNodeId ->
                                         notifyFollowerAsLeader(prevLogIndex, targetNodeId));
                     }
 
+                    applyPendingEntriesToStateMachine();
 
                 } finally {
                     lock.writeLock().unlock();
@@ -452,7 +451,7 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
             log.debug("node {} : nextIndexForNode={} prevLogTerm={}", targetNodeId, nextIndexForNode, prevLogTerm);
 
             final CmdRaftAppendEntries<T> appendRequest = new CmdRaftAppendEntries<>(
-                    currentTerm,
+                    logRepository.getCurrentTerm(),
                     currentNodeId,
                     nextIndexForNode - 1,
                     prevLogTerm,
@@ -480,7 +479,7 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
         if (currentState != RaftNodeState.FOLLOWER) {
             log.debug("Switching to follower (reset votedFor, start append timer)");
             currentState = RaftNodeState.FOLLOWER;
-            votedFor = -1;
+            logRepository.setVotedFor(-1);
             resetFollowerAppendTimer();
         }
     }
@@ -520,11 +519,12 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
             // - Vote for self
             // - Reset election timer
             // - Send RequestVote RPCs to all other servers
-            currentTerm++;
+            final int currentTerm = logRepository.getCurrentTerm() + 1;
+            logRepository.setCurrentTerm(currentTerm);
 
             log.info("heartbeat timeout - switching to CANDIDATE, term={}", currentTerm);
 
-            votedFor = currentNodeId;
+            logRepository.setVotedFor(currentNodeId);
 
             final int prevLogTerm = logRepository.getLastLogTerm();
             final long prevLogIndex = logRepository.getLastLogIndex();
@@ -564,9 +564,19 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
         All Servers: If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine (5.3)
         */
 
-        // TODO request range (up to commitIndex)
-        final List<RaftLogEntry<T>> entriesToApply = logRepository.getEntries(lastApplied + 1, Integer.MAX_VALUE);
+        final long numEntriesToRequest = commitIndex - lastApplied;
+
+        if (numEntriesToRequest < 1) {
+            return;
+        }
+
+        log.debug("Requesting {} ({}..{}) entries to apply to state machine...", numEntriesToRequest, lastApplied + 1, lastApplied + numEntriesToRequest);
+        final List<RaftLogEntry<T>> entriesToApply = logRepository.getEntries(lastApplied + 1, (int) numEntriesToRequest);
         int idx = 0;
+
+        if (entriesToApply.size() != numEntriesToRequest) {
+            throw new IllegalStateException("Unexpected number of entries: " + entriesToApply.size());
+        }
 
         log.debug("entries to apply: {}", entriesToApply);
 

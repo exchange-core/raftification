@@ -20,7 +20,6 @@ package exchange.core2.raftification.repository;
 import exchange.core2.raftification.RsmRequestFactory;
 import exchange.core2.raftification.messages.RaftLogEntry;
 import exchange.core2.raftification.messages.RsmRequest;
-import org.agrona.collections.MutableLong;
 import org.eclipse.collections.api.tuple.primitive.LongLongPair;
 import org.eclipse.collections.impl.tuple.primitive.PrimitiveTuples;
 import org.slf4j.Logger;
@@ -30,7 +29,6 @@ import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -43,32 +41,39 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
 
     private final RaftDiskLogConfig config;
 
-    private RandomAccessFile raf;
-    private FileChannel writeChannel;
-    private FileChannel readChannel;
+    private RandomAccessFile logRaf;
+    private FileChannel logWriteChannel;
+    private FileChannel logReadChannel;
 
     private RandomAccessFile offsetIndexRaf;
-    private FileChannel offsetIndexWriteChannel;
+    private FileChannel offsetIndexChannel;
 
     private RandomAccessFile termIndexRaf;
-    private FileChannel termIndexWriteChannel;
+    private FileChannel termIndexChannel;
 
+    private RandomAccessFile stateRaf;
+
+    // latest term server has seen (initialized to 0 on first boot, increases monotonically)
+    private int currentTerm = 0;
+
+    // candidateId that received vote in current term (or -1 if none)
+    private int votedFor = -1;
 
     // index -> position in file // TODO keep term in the index?
     // TODO implement multi-file index
-    private NavigableMap<Long, Long> currentOffsetIndex = new TreeMap<>(); // TODO  use ART ?
+    private NavigableMap<Long, Long> currentOffsetIndex = new TreeMap<>();
 
     // TODO ReadWrite locks
 
-    private long baseSnapshotId;
+    private final long baseSnapshotId; // TODO implement snapshots
 
-    private int filesCounter = 0;
+    private final int filesCounter = 0; // TODO implement file counter
 
     private long writtenBytes = 0;
     private long lastIndexWrittenAt = 0;
 
-    private long lastIndex = 0L;
-    private int lastLogTerm = 0;
+    private long lastIndex = 0L; // last entry index (counter)
+    private int lastLogTerm = 0; // cached term of the last entry
 
     private final ByteBuffer journalWriteBuffer = ByteBuffer.allocateDirect(512 * 1024);
     private final ByteBuffer offsetIndexWriteBuffer = ByteBuffer.allocateDirect(64);
@@ -101,11 +106,9 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
         this.rsmRequestFactory = rsmRequestFactory;
         this.config = raftDiskLogConfig;
 
-        final long timestamp = System.currentTimeMillis();
+        initialize();
 
-        baseSnapshotId = timestamp;
-
-        startNewFile(timestamp);
+        baseSnapshotId = 0L;
     }
 
 
@@ -157,15 +160,6 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
 
         log.debug("appendEntry: eob={} {}", endOfBatch, logEntry);
 
-        if (writeChannel == null) {
-            log.debug("startNewFile({})..", logEntry.timestamp());
-            startNewFile(logEntry.timestamp());
-        }
-
-        final ByteBuffer buffer = journalWriteBuffer;
-
-        lastIndex++;
-
         final int term = logEntry.term();
 
         if (term < lastLogTerm) {
@@ -174,24 +168,25 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
 
             log.debug("Updating term: {} -> {}", lastLogTerm, term);
 
-            if (lastLogTerm != 0) {
-                termLastIndex.put(term, lastIndex - 1);
+            termLastIndex.put(term, lastIndex);
 
-                // saving previous term
-                indexToTermMap.put(lastIndex - 1, lastLogTerm);
+            // saving previous term
+            indexToTermMap.put(lastIndex, lastLogTerm);
 
-                try {
+            log.debug("termLastIndex: {}", termLastIndex);
+            log.debug("indexToTermMap: {}", indexToTermMap);
 
-                    termIndexWriteBuffer.putLong(lastIndex);
-                    termIndexWriteBuffer.putLong(writtenBytes);
-                    termIndexWriteBuffer.flip();
-                    termIndexWriteChannel.write(offsetIndexWriteBuffer);
-                    termIndexWriteBuffer.clear();
+            try {
 
-                } catch (IOException ex) {
-                    throw new RuntimeException(ex);
-                }
+                termIndexWriteBuffer.putLong(lastIndex);
+                termIndexWriteBuffer.putInt(lastLogTerm);
+                termIndexWriteBuffer.putInt(term);
+                termIndexWriteBuffer.flip();
+                termIndexChannel.write(termIndexWriteBuffer);
+                termIndexWriteBuffer.clear();
 
+            } catch (IOException ex) {
+                throw new RuntimeException(ex);
             }
 
             lastLogTerm = term;
@@ -199,11 +194,13 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
             log.info("termIndex: {}", termLastIndex);
         }
 
+        lastIndex++;
+
         entriesCache.put(lastIndex, logEntry);
 
-        logEntry.serialize(buffer);
+        logEntry.serialize(journalWriteBuffer);
 
-        if (endOfBatch || buffer.position() >= config.getJournalBufferFlushTrigger()) {
+        if (endOfBatch || journalWriteBuffer.position() >= config.getJournalBufferFlushTrigger()) {
 
             // flushing on end of batch or when buffer is full
             flushBufferSync(false, logEntry.timestamp());
@@ -233,18 +230,20 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
 
                 if (removeAfter != -1) {
 
-                    final long position = findPosition(removeAfter);
-                    log.debug("Removing after position: {}", position);
-                    writeChannel.position(position);
-                    writeChannel.truncate(position);
-                    writtenBytes = position;
-
-                    truncateIndexRecords(removeAfter);
-
                     if (true) { // TODO implement
                         log.error("termLastIndex truncation/loading is not implemented");
                         System.exit(-1);
                     }
+
+
+                    final long position = findPosition(removeAfter);
+                    log.debug("Removing after position: {}", position);
+                    logWriteChannel.position(position);
+                    logWriteChannel.truncate(position);
+                    writtenBytes = position;
+
+                    truncateIndexRecords(removeAfter);
+
 
                     lastIndex = removeAfter;
                     lastLogTerm = getEntries(lastIndex, 1).get(0).term();
@@ -273,17 +272,51 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
         }
     }
 
+    @Override
+    public int getCurrentTerm() {
+        return currentTerm;
+    }
+
+    @Override
+    public void setCurrentTerm(int term) {
+
+        try {
+            stateRaf.seek(0);
+            stateRaf.writeInt(term);
+            currentTerm = term;
+        } catch (IOException ex) {
+            throw new IllegalStateException("Can not save state: term=" + term, ex);
+        }
+    }
+
+    @Override
+    public int getVotedFor() {
+        return votedFor;
+    }
+
+    @Override
+    public void setVotedFor(int nodeId) {
+
+        try {
+            stateRaf.seek(4);
+            stateRaf.writeInt(votedFor);
+            votedFor = nodeId;
+        } catch (IOException ex) {
+            throw new IllegalStateException("Can not save state: votedFor=" + nodeId, ex);
+        }
+    }
+
     private long findPosition(long removeAfter) throws IOException {
 
         final LongLongPair startingIndexPoint = findStartingIndexPoint(removeAfter);
         final long startOffset = startingIndexPoint.getOne();
         final long floorIndex = startingIndexPoint.getTwo();
 
-        readChannel.position(startOffset);
+        logReadChannel.position(startOffset);
 
         long idx = floorIndex;
 
-        try (final InputStream is = Channels.newInputStream(readChannel);
+        try (final InputStream is = Channels.newInputStream(logReadChannel);
              final BufferedInputStream bis = new BufferedInputStream(is);
              final DataInputStream dis = new DataInputStream(bis)) {
 
@@ -294,7 +327,7 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
                 idx++;
 
                 if (idx == removeAfter) {
-                    return readChannel.position();
+                    return logReadChannel.position();
                 }
             }
         }
@@ -314,12 +347,12 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
 
         final Map.Entry<Long, Long> lastIndexEntry = currentOffsetIndex.lastEntry();
 
-        offsetIndexWriteChannel.position(0L);
+        offsetIndexChannel.position(0L);
 
         if (lastIndexEntry == null) {
             // empty tree - just clean all file
             lastIndexWrittenAt = 0L;
-            offsetIndexWriteChannel.truncate(0L);
+            offsetIndexChannel.truncate(0L);
 
         } else {
 
@@ -327,7 +360,7 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
             lastIndexWrittenAt = lastIndexEntry.getValue();
 
             // remove all records after
-            try (final InputStream is = Channels.newInputStream(offsetIndexWriteChannel);
+            try (final InputStream is = Channels.newInputStream(offsetIndexChannel);
                  final BufferedInputStream bis = new BufferedInputStream(is);
                  final DataInputStream dis = new DataInputStream(bis)) {
 
@@ -338,9 +371,9 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
                     dis.readLong();
 
                     if (lastIndex > lastIndexEntry.getKey()) {
-                        final long pos = offsetIndexWriteChannel.position() - 16;
-                        offsetIndexWriteChannel.position(pos);
-                        offsetIndexWriteChannel.truncate(pos);
+                        final long pos = offsetIndexChannel.position() - 16;
+                        offsetIndexChannel.position(pos);
+                        offsetIndexChannel.truncate(pos);
                         return;
                     }
                 }
@@ -349,15 +382,20 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
     }
 
     private long verifyTerms(List<RaftLogEntry<T>> newEntries, long prevLogIndex) {
+
+        log.info("Verify terms: requesting {} entries starting from {}", newEntries.size(), prevLogIndex);
+
         final List<RaftLogEntry<T>> existingEntries = getEntries(prevLogIndex, newEntries.size());
         final int intersectionLength = Math.min(existingEntries.size(), newEntries.size());
 
         for (int i = 0; i < intersectionLength; i++) {
             if (existingEntries.get(i).term() != newEntries.get(i).term()) {
+                log.debug("Items not matching at position {}: existing:{} new:{}", prevLogIndex + i, existingEntries.get(i), newEntries.get(i));
                 return prevLogIndex + i;
             }
         }
 
+        log.info("All iterms are matching");
         return -1;
     }
 
@@ -387,12 +425,17 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
 
         // try using cache first
 
-        final SortedMap<Long, RaftLogEntry<T>> longRaftLogEntrySortedMap = entriesCache.tailMap(indexFrom);
-        final Long firstKey = longRaftLogEntrySortedMap.firstKey();
-        log.debug("Trying getting values from cache, firstKey = {}", firstKey);
-        if (firstKey != null && firstKey == indexFrom) {
-            // if cache contains indexFrom - it contains everything
-            return longRaftLogEntrySortedMap.values().stream().limit(limit).collect(Collectors.toList());
+        final SortedMap<Long, RaftLogEntry<T>> subMap = entriesCache.tailMap(indexFrom);
+
+        // log.debug("subMap: {}", subMap);
+
+        if (!subMap.isEmpty()) {
+            final Long firstKey = subMap.firstKey();
+            log.debug("Trying getting values from cache, firstKey = {} (expecting {})", firstKey, indexFrom);
+            if (firstKey == indexFrom) {
+                // if cache contains indexFrom - it contains everything
+                return subMap.values().stream().limit(limit).collect(Collectors.toList());
+            }
         }
 
         // using disk (cache did not work)
@@ -403,70 +446,155 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
 
         try {
             log.debug("Using disk: reading from {} - floorIndex:{} offset:{}", indexFrom, floorIndex, startOffset);
-            readChannel.position(startOffset);
+            logReadChannel.position(startOffset);
             log.debug("Position ok");
         } catch (IOException ex) {
             throw new RuntimeException("can not read log at offset " + startOffset, ex);
         }
 
-        final List<RaftLogEntry<T>> entries = new ArrayList<>();
-
-        final MutableLong indexCounter = new MutableLong(floorIndex);
-        log.debug("indexCounter={}", indexCounter);
-
-
         // dont use try-catch as we dont want to close readChannel
-        final InputStream is = Channels.newInputStream(readChannel);
+        final InputStream is = Channels.newInputStream(logReadChannel);
         final BufferedInputStream bis = new BufferedInputStream(is);
         final DataInputStream dis = new DataInputStream(bis);
         try {
 
-            readCommands(dis, entries, indexCounter, indexFrom, limit);
-            return entries;
+            return readCommands(dis, floorIndex, indexFrom, limit);
 
         } catch (IOException ex) {
             throw new RuntimeException(ex);
         }
     }
 
-    private void startNewFile(final long timestamp) {
+    // TODO convert to static
+    private void initialize() {
 
         try {
 
-            filesCounter++;
+            {
+                final Path offsetIndexFileName = resolveOffsetIndexPath(filesCounter, baseSnapshotId);
 
-            closeCurrentFiles();
+                log.debug("Reading offset index file: {} ...", offsetIndexFileName);
 
-            final Path logFileName = resolveJournalPath(filesCounter, baseSnapshotId);
-            final Path offsetIndexFileName = resolveOffsetIndexPath(filesCounter, baseSnapshotId);
-            final Path termIndexFileName = resolveTermIndexPath(filesCounter, baseSnapshotId);
+                offsetIndexRaf = new RandomAccessFile(offsetIndexFileName.toString(), "rwd");
+                offsetIndexChannel = offsetIndexRaf.getChannel();
 
-            log.debug("Starting new raft log file: {} offset index file: {}", logFileName, offsetIndexFileName);
+                final InputStream is = Channels.newInputStream(offsetIndexChannel);
+                final BufferedInputStream bis = new BufferedInputStream(is);
+                final DataInputStream dis = new DataInputStream(bis);
 
-            if (Files.exists(logFileName)) {
-                throw new IllegalStateException("File already exists: " + logFileName);
+                while (dis.available() != 0) {
+
+                    // read index record (16 bytes)
+                    final long idx = dis.readLong();
+                    final long offset = dis.readLong();
+
+                    log.debug("  index {} -> offset {}", idx, offset);
+                    currentOffsetIndex.put(idx, offset);
+                }
             }
 
-            if (Files.exists(offsetIndexFileName)) {
-                throw new IllegalStateException("File already exists: " + offsetIndexFileName);
+            {
+                final Map.Entry<Long, Long> lastIndexEntry = currentOffsetIndex.lastEntry();
+                final long floorIndex = (lastIndexEntry == null) ? 0L : lastIndexEntry.getKey();
+                final long startOffset = (lastIndexEntry == null) ? 0L : lastIndexEntry.getValue();
+
+                lastIndexWrittenAt = startOffset;
+                log.debug("lastIndexWrittenAt={}", lastIndexWrittenAt);
+
+                final Path logFileName = resolveJournalPath(filesCounter, baseSnapshotId);
+
+                log.debug("Reading raft log file: {} ...", logFileName);
+
+                logRaf = new RandomAccessFile(logFileName.toString(), "rwd");
+                logWriteChannel = logRaf.getChannel();
+                logReadChannel = logRaf.getChannel();
+
+                writtenBytes = logRaf.length();
+                log.debug("writtenBytes={}", writtenBytes);
+
+                try {
+                    log.debug("Last index record - floorIndex:{} offset:{}", floorIndex, startOffset);
+                    logReadChannel.position(startOffset);
+                    log.debug("Position ok");
+                } catch (IOException ex) {
+                    throw new RuntimeException("can not read log at offset " + startOffset, ex);
+                }
+
+                final InputStream is = Channels.newInputStream(logReadChannel);
+                final BufferedInputStream bis = new BufferedInputStream(is);
+                final DataInputStream dis = new DataInputStream(bis);
+
+                final List<RaftLogEntry<T>> entries = readCommands(dis, floorIndex, floorIndex, Integer.MAX_VALUE);
+
+
+                long index = floorIndex;
+                for (RaftLogEntry<T> entry : entries) {
+                    index++;
+                    entriesCache.put(index, entry);
+                    log.debug("{}. {}", index, entry);
+                }
+
+                lastIndex = index;
+                log.debug("lastIndex={}", lastIndex);
             }
 
-            if (Files.exists(termIndexFileName)) {
-                throw new IllegalStateException("File already exists: " + termIndexFileName);
+            {
+                final Path termIndexFileName = resolveTermIndexPath(filesCounter, baseSnapshotId);
+
+                log.debug("Reading terms index file: {} ...", termIndexFileName);
+
+                termIndexRaf = new RandomAccessFile(termIndexFileName.toString(), "rwd");
+                termIndexChannel = termIndexRaf.getChannel();
+
+                final InputStream is = Channels.newInputStream(termIndexChannel);
+                final BufferedInputStream bis = new BufferedInputStream(is);
+                final DataInputStream dis = new DataInputStream(bis);
+
+                lastLogTerm = 0;
+
+                while (dis.available() != 0) {
+
+                    final long lastIndex = dis.readLong();
+                    final int prevTerm = dis.readInt();
+                    final int term = dis.readInt();
+
+                    log.debug("  term {}->{} lastIndex={}", prevTerm, term, lastIndex);
+
+                    termLastIndex.put(term, lastIndex);
+                    indexToTermMap.put(lastIndex, prevTerm);
+
+                    lastLogTerm = term;
+                }
+
+                log.debug("lastLogTerm={}", lastLogTerm);
+
             }
 
-            raf = new RandomAccessFile(logFileName.toString(), "rwd");
-            writeChannel = raf.getChannel();
-            readChannel = raf.getChannel();
+            {
+                final Path statePath = resolveStatePath(filesCounter, baseSnapshotId);
 
-            offsetIndexRaf = new RandomAccessFile(offsetIndexFileName.toString(), "rwd");
-            offsetIndexWriteChannel = offsetIndexRaf.getChannel();
+                log.debug("Reading state file: {} ...", statePath);
 
-            termIndexRaf = new RandomAccessFile(termIndexFileName.toString(), "rwd");
-            termIndexWriteChannel = termIndexRaf.getChannel();
+                stateRaf = new RandomAccessFile(statePath.toString(), "rwd");
 
-            registerNextJournal(baseSnapshotId, timestamp); // TODO fix time
+                if (stateRaf.length() == 8L) {
 
+                    stateRaf.seek(0);
+                    currentTerm = stateRaf.readInt();
+
+                    stateRaf.seek(4);
+                    votedFor = stateRaf.readInt();
+
+                    log.info("State: currentTerm={} votedFor={}", currentTerm, votedFor);
+                } else {
+                    log.info("stateRaf.available()={} setting length to 8", stateRaf.length());
+                    stateRaf.setLength(8L);
+                    stateRaf.seek(0);
+                }
+
+            }
+
+            // TODO validations
 
         } catch (IOException ex) {
             throw new RuntimeException(ex);
@@ -495,6 +623,9 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
         return config.getWorkFolder().resolve(String.format("%s_%d_%04X.tidx", config.getExchangeId(), snapshotId, partitionId));
     }
 
+    private Path resolveStatePath(int partitionId, long snapshotId) {
+        return config.getWorkFolder().resolve(String.format("%s_%d_%04X.ecst", config.getExchangeId(), snapshotId, partitionId));
+    }
 
     private void flushBufferSync(final boolean forceStartNextFile,
                                  final long timestampNs) {
@@ -506,7 +637,7 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
             // uncompressed write for single messages or small batches
             writtenBytes += journalWriteBuffer.position();
             journalWriteBuffer.flip();
-            writeChannel.write(journalWriteBuffer);
+            logWriteChannel.write(journalWriteBuffer);
             journalWriteBuffer.clear();
 
             //
@@ -523,7 +654,7 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
                 offsetIndexWriteBuffer.putLong(nextIndex);
                 offsetIndexWriteBuffer.putLong(writtenBytes);
                 offsetIndexWriteBuffer.flip();
-                offsetIndexWriteChannel.write(offsetIndexWriteBuffer);
+                offsetIndexChannel.write(offsetIndexWriteBuffer);
                 offsetIndexWriteBuffer.clear();
 
             }
@@ -533,8 +664,11 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
 //            log.info("RAW {}", LatencyTools.createLatencyReportFast(hdrRecorderRaw.getIntervalHistogram()));
 //            log.info("LZ4-compression {}", LatencyTools.createLatencyReportFast(hdrRecorderLz4.getIntervalHistogram()));
 
+                log.error("New file not implemented yet");
+                System.exit(-5);
+
                 // todo start preparing new file asynchronously, but ONLY ONCE
-                startNewFile(timestampNs);
+                // startNewFile(timestampNs);
                 writtenBytes = 0;
             }
         } catch (IOException ex) {
@@ -543,86 +677,39 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
     }
 
 
-//    private List<RaftLogEntry<T>> readData(final long baseSnapshotId,
-//                                           final long indexFrom,
-//                                           final int limit) throws IOException {
-//
-//
-//        final List<RaftLogEntry<T>> entries = new ArrayList<>();
-//
-//        final MutableLong currentIndex = new MutableLong(0L);
-//
-//        int partitionCounter = 1;
-//
-//        while (true) {
-//
-//            final Path path = resolveJournalPath(partitionCounter, baseSnapshotId);
-//
-//            // TODO Use index
-//
-//            log.debug("Reading RAFT log file: {}", path.toFile());
-//
-//            try (final FileInputStream fis = new FileInputStream(path.toFile());
-//                 final BufferedInputStream bis = new BufferedInputStream(fis);
-//                 final DataInputStream dis = new DataInputStream(bis)) {
-//
-//                final boolean done = readCommands(dis, entries, currentIndex, indexFrom, limit - entries.size());
-//                if (done) {
-//                    return entries;
-//                }
-//
-//
-//                partitionCounter++;
-//                log.debug("EOF reached, reading next partition {}...", partitionCounter);
-//
-//            } catch (FileNotFoundException ex) {
-//                log.debug("FileNotFoundException: currentIndex={}, {}", currentIndex, ex.getMessage());
-//                throw ex;
-//
-//            } catch (EOFException ex) {
-//                // partitionCounter++;
-//                log.debug("File end reached through exception, currentIndex={} !!!", currentIndex);
-//                throw ex;
-//            }
-//        }
-//
-//    }
+    private List<RaftLogEntry<T>> readCommands(final DataInputStream dis,
+                                               long floorIndex,
+                                               final long readFromIndex,
+                                               final int limit) throws IOException {
 
+        final List<RaftLogEntry<T>> list = new ArrayList<>();
 
-    private boolean readCommands(final DataInputStream dis,
-                                 final List<RaftLogEntry<T>> collector,
-                                 final MutableLong indexCounter,
-                                 final long indexFrom,
-                                 final int limit) throws IOException {
-
-
-        log.debug("Reading commands: indexCounter={} indexFrom={} limit={} dis.available()={}", indexCounter, indexFrom, limit, dis.available());
+        log.debug("Reading commands: floorIndex={} indexFrom={} limit={} dis.available()={}", floorIndex, readFromIndex, limit, dis.available());
 
         int c = 0;
-        boolean foundAll = false;
         while (dis.available() != 0) {
 
             c++;
 
-            final long idx = indexCounter.getAndIncrement();
+            final long idx = floorIndex++;
 
 //             log.debug("  idx={} available={}", idx, dis.available());
 
             final RaftLogEntry<T> logEntry = RaftLogEntry.create(dis, rsmRequestFactory);
 
-            if (idx >= indexFrom) {
+            if (idx >= readFromIndex) {
                 // log.debug("Adding record into collection idx={} {}", idx, logEntry);
-                collector.add(logEntry);
+                list.add(logEntry);
             }
 
-            // log.debug("collector.size()={} limit={}", collector.size(), limit);
-            if (collector.size() == limit) {
-                foundAll = true;
+            // log.debug("list.size()={} limit={}", list.size(), limit);
+            if (list.size() == limit) {
+                break;
             }
         }
 
-        log.debug("Performed {} read iterations, found {} (total) matching entries, foundAll={} ", c, collector.size(), foundAll);
-        return foundAll;
+        log.debug("Performed {} read iterations, found {} (total) matching entries", c, list.size());
+        return list;
     }
 
 
@@ -635,20 +722,22 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
 
         log.debug("Closing current files");
 
-        if (writeChannel != null) {
-            writeChannel.close();
-            readChannel.close();
-            raf.close();
+        if (logWriteChannel != null) {
+            logWriteChannel.close();
+            logReadChannel.close();
+            logRaf.close();
         }
 
-        if (offsetIndexWriteChannel != null) {
-            offsetIndexWriteChannel.close();
+        if (offsetIndexChannel != null) {
+            offsetIndexChannel.close();
             offsetIndexRaf.close();
         }
 
-        if (termIndexWriteChannel != null) {
-            termIndexWriteChannel.close();
+        if (termIndexChannel != null) {
+            termIndexChannel.close();
             termIndexRaf.close();
         }
+
+        stateRaf.close();
     }
 }
