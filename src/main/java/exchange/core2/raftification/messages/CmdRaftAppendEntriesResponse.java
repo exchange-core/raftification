@@ -29,7 +29,7 @@ import java.nio.ByteBuffer;
  * than one RPC per entry. In practice, we doubt this optimization is necessary, since failures happen infrequently
  * and it is unlikely that there will be many inconsistent entries.
  */
-public record CmdRaftAppendEntriesResponse(int term, boolean success) implements RpcResponse {
+public record CmdRaftAppendEntriesResponse(int term, long lastKnownIndex, boolean success) implements RpcResponse {
 
     @Override
     public int getMessageType() {
@@ -38,14 +38,24 @@ public record CmdRaftAppendEntriesResponse(int term, boolean success) implements
 
     @Override
     public void serialize(ByteBuffer buffer) {
+        buffer.putLong(lastKnownIndex);
         buffer.putInt(term);
         buffer.put(success ? (byte) 1 : (byte) 0);
     }
 
+    public static CmdRaftAppendEntriesResponse createFailed(int term, long lastKnownIndex) {
+        return new CmdRaftAppendEntriesResponse(term, lastKnownIndex, false);
+    }
+
+    public static CmdRaftAppendEntriesResponse createSuccess(int term) {
+        return new CmdRaftAppendEntriesResponse(term, -1, true);
+    }
+
     public static CmdRaftAppendEntriesResponse create(ByteBuffer bb) {
+        final long lastKnownIndex = bb.getLong();
         final int term = bb.getInt();
         final boolean success = bb.get() == 1;
-        return new CmdRaftAppendEntriesResponse(term, success);
+        return new CmdRaftAppendEntriesResponse(term, lastKnownIndex, success);
     }
 
     @Override
@@ -53,6 +63,7 @@ public record CmdRaftAppendEntriesResponse(int term, boolean success) implements
         return "CmdRaftAppendEntriesResponse{" +
                 "term=" + term +
                 ", success=" + success +
+                ", lastKnownIndex=" + lastKnownIndex +
                 '}';
     }
 }

@@ -163,7 +163,7 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                         // 1. Reply false if term < currentTerm
                         if (cmd.term() < logRepository.getCurrentTerm()) {
                             log.debug("Ignoring leader with older term {} (current={}", cmd.term(), logRepository.getCurrentTerm());
-                            return new CmdRaftAppendEntriesResponse(logRepository.getCurrentTerm(), false);
+                            return CmdRaftAppendEntriesResponse.createFailed(logRepository.getCurrentTerm(), -1);
                         }
 
                         if (currentState == RaftNodeState.CANDIDATE) {
@@ -192,22 +192,28 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                         resetFollowerAppendTimer();
 
                         if (cmd.entries().isEmpty()) {
-                            return new CmdRaftAppendEntriesResponse(logRepository.getCurrentTerm(), true);
+                            return CmdRaftAppendEntriesResponse.createSuccess(logRepository.getCurrentTerm());
                         }
 
                         log.debug("Adding new records into the log...");
 
                         // 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
                         final long prevLogIndex = cmd.prevLogIndex();
-                        if (prevLogIndex > 0 && prevLogIndex != logRepository.getLastLogIndex()) {
-                            log.warn("Reject - log doesn’t contain an entry at prevLogIndex={} (last is {}))", prevLogIndex, logRepository.getLastLogIndex());
-                            return new CmdRaftAppendEntriesResponse(logRepository.getCurrentTerm(), false);
+                        final long localLastLogIndex = logRepository.getLastLogIndex();
+                        if (prevLogIndex > 0 && prevLogIndex > localLastLogIndex) {
+                            log.warn("Reject - log does not contain an entry at prevLogIndex={} (last is {}))", prevLogIndex, localLastLogIndex);
+                            return CmdRaftAppendEntriesResponse.createFailed(logRepository.getCurrentTerm(), localLastLogIndex);
                         }
 
-                        final int lastLogTerm = logRepository.getLastLogTerm();
-                        if (cmd.prevLogTerm() != lastLogTerm) {
-                            log.warn("Reject - last known log record has term {}, leader provided prevLogTerm={}", lastLogTerm, cmd.prevLogTerm());
-                            return new CmdRaftAppendEntriesResponse(logRepository.getCurrentTerm(), false);
+                        final int termOfIndex = logRepository.findTermOfIndex(prevLogIndex);
+                        if (cmd.prevLogTerm() != termOfIndex) {
+                            log.warn("Reject - entry {} has term {}, leader provided prevLogTerm={}", prevLogIndex, termOfIndex, cmd.prevLogTerm());
+                            return CmdRaftAppendEntriesResponse.createFailed(logRepository.getCurrentTerm(), localLastLogIndex);
+                        }
+
+                        if (cmd.prevLogIndex() < lastApplied) {
+                            log.error("Already applied index {} to RSM, can not accept prevLogIndex={}", lastApplied, cmd.prevLogIndex());
+                            System.exit(-1); // TODO fix
                         }
 
                         // 3. If an existing entry conflicts with a new one (same index but different terms),
@@ -220,14 +226,14 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
 
                         // 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
                         if (cmd.leaderCommit() > commitIndex) {
-                            commitIndex = Math.min(cmd.leaderCommit(), logRepository.getLastLogIndex());
+                            commitIndex = Math.min(cmd.leaderCommit(), localLastLogIndex);
                             log.debug("set commitIndex to {}", commitIndex);
                         }
 
                         // todo can do in different thread
 //                        applyPendingEntriesToStateMachine();
 
-                        return new CmdRaftAppendEntriesResponse(logRepository.getCurrentTerm(), true);
+                        return CmdRaftAppendEntriesResponse.createSuccess(logRepository.getCurrentTerm());
                     }
 
                 } finally {
@@ -298,8 +304,18 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                                 // until term and index will be matching with leader (meaning all previous entries are also matching
 
                                 if (nextIndex[fromNodeId] > 1) {
-                                    log.debug("decrementing nextIndex[{}] to {}", fromNodeId, nextIndex[fromNodeId] - 1);
-                                    nextIndex[fromNodeId]--;
+
+                                    if (appendResponse.lastKnownIndex() == -1) {
+                                        log.debug("decrementing nextIndex[{}] to {}", fromNodeId, nextIndex[fromNodeId] - 1);
+                                        nextIndex[fromNodeId]--;
+                                    } else {
+
+                                        final long newNextIndex = Math.min(nextIndex[fromNodeId] - 1, appendResponse.lastKnownIndex() + 1);
+
+                                        log.debug("setting nextIndex[{}] {}->{} min({},{})", fromNodeId, nextIndex[fromNodeId], newNextIndex, nextIndex[fromNodeId] - 1, appendResponse.lastKnownIndex() + 1);
+                                        nextIndex[fromNodeId] = newNextIndex;
+                                    }
+
                                 } else {
                                     log.warn("Can not decrement nextIndex[{}]", fromNodeId);
                                 }

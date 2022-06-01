@@ -61,7 +61,7 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
 
     // index -> position in file // TODO keep term in the index?
     // TODO implement multi-file index
-    private NavigableMap<Long, Long> currentOffsetIndex = new TreeMap<>();
+    private NavigableMap<Long, Long> offsetIndex = new TreeMap<>();
 
     // TODO ReadWrite locks
 
@@ -80,7 +80,8 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
     private final ByteBuffer termIndexWriteBuffer = ByteBuffer.allocateDirect(64);
 
 
-    // maps every known term to last index of entries of this term
+    // maps every known term to last index of entries of previous term
+    // so for each key K it has reference to element preceding to first element in term K
     // TODO load from file
     // TODO can use binary search (both in the same array)
     private NavigableMap<Integer, Long> termLastIndex = new TreeMap<>();
@@ -93,6 +94,7 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
 
 
     // TODO cleanup cache (after confirmation + size limit)
+    // always contains at least all records after index point
     private NavigableMap<Long, RaftLogEntry<T>> entriesCache = new TreeMap<>();
 
 
@@ -225,28 +227,13 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
             // check if leader is overriding some records
             if (prevLogIndex < lastIndex) {
 
+                log.debug("Overriding {} records...", lastIndex - prevLogIndex);
+
                 // TODO loading just to compare term - can be done faster
-                final long removeAfter = verifyTerms(newEntries, prevLogIndex);
-
-                if (removeAfter != -1) {
-
-                    if (true) { // TODO implement
-                        log.error("termLastIndex truncation/loading is not implemented");
-                        System.exit(-1);
-                    }
-
-
-                    final long position = findPosition(removeAfter);
-                    log.debug("Removing after position: {}", position);
-                    logWriteChannel.position(position);
-                    logWriteChannel.truncate(position);
-                    writtenBytes = position;
-
-                    truncateIndexRecords(removeAfter);
-
-
-                    lastIndex = removeAfter;
-                    lastLogTerm = getEntries(lastIndex, 1).get(0).term();
+                final long removeIdx = verifyTerms(newEntries, prevLogIndex);
+                log.debug("removeIdx={}", removeIdx);
+                if (removeIdx != -1) {
+                    truncateLog(removeIdx - 1);
                 }
             }
 
@@ -306,81 +293,115 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
         }
     }
 
-    private long findPosition(long removeAfter) throws IOException {
+    private long findLogTruncateOffset(long removeAfter) throws IOException {
 
-        final LongLongPair startingIndexPoint = findStartingIndexPoint(removeAfter);
+        final LongLongPair startingIndexPoint = findStartingIndexPoint(removeAfter + 1);
         final long startOffset = startingIndexPoint.getOne();
         final long floorIndex = startingIndexPoint.getTwo();
 
-        logReadChannel.position(startOffset);
+        log.debug("Last index record: floorIndex={} startOffset={}", floorIndex, startOffset);
+
+
+        if (floorIndex == removeAfter + 1) {
+            log.debug("Index hit: using startOffset={}", startOffset);
+            return startOffset;
+        }
 
         long idx = floorIndex;
 
-        try (final InputStream is = Channels.newInputStream(logReadChannel);
-             final BufferedInputStream bis = new BufferedInputStream(is);
-             final DataInputStream dis = new DataInputStream(bis)) {
+        logReadChannel.position(startOffset);
 
-            while (dis.available() != 0) {
+        final InputStream is = Channels.newInputStream(logReadChannel);
+        final BufferedInputStream bis = new BufferedInputStream(is);
+        final DataInputStream dis = new DataInputStream(bis);
 
-                RaftLogEntry.create(dis, rsmRequestFactory);
+        while (dis.available() != 0) {
 
-                idx++;
+            final RaftLogEntry<T> entry = RaftLogEntry.create(dis, rsmRequestFactory);
 
-                if (idx == removeAfter) {
-                    return logReadChannel.position();
-                }
+            // log.debug("{}. {}", idx, entry);
+
+            idx++;
+
+            if (idx == removeAfter) {
+                final long position = logReadChannel.position();
+                log.debug("Found entry idx={} ends at position={}", removeAfter, position);
+                return position;
             }
         }
 
-        throw new RuntimeException("Can not reach index " + removeAfter);
+        throw new IllegalStateException("Can not reach index removeAfter=" + removeAfter);
     }
 
-    private void truncateIndexRecords(long removeAfterIndex) throws IOException {
 
-        // TODO truncate term index
+    private void truncateLog(long removeAfter) throws IOException {
 
-        // clean offset index
-        currentOffsetIndex.tailMap(removeAfterIndex, false).clear();
+        final long logTruncateOffset = findLogTruncateOffset(removeAfter);
+
+        log.debug("Removing log data after idx={} logTruncateOffset: {}", removeAfter, logTruncateOffset);
+
 
         // clean cache
-        entriesCache.tailMap(removeAfterIndex, false).clear();
+        log.debug("entriesCache before: {}", entriesCache);
+        entriesCache.tailMap(removeAfter, false).clear();
+        log.debug("entriesCache after: {}", entriesCache);
 
-        final Map.Entry<Long, Long> lastIndexEntry = currentOffsetIndex.lastEntry();
+        // remove invalid index records
+        log.debug("offsetIndex before: {}", offsetIndex);
+        offsetIndex.tailMap(removeAfter, false).clear();
+        log.debug("offsetIndex after: {}", offsetIndex);
 
-        offsetIndexChannel.position(0L);
+        // updating offset where last index was written
+        final Map.Entry<Long, Long> lastIndexEntry = offsetIndex.lastEntry();
+        lastIndexWrittenAt = (lastIndexEntry == null) ? 0L : lastIndexEntry.getValue();
+        log.debug("lastIndexWrittenAt new: {}", lastIndexWrittenAt);
 
-        if (lastIndexEntry == null) {
-            // empty tree - just clean all file
-            lastIndexWrittenAt = 0L;
-            offsetIndexChannel.truncate(0L);
+        // term of new last element
+        final int newLastTerm = findTermOfIndex(removeAfter);
+        log.debug("newLastTerm: {}", newLastTerm);
 
-        } else {
+        log.debug("termLastIndex before: {}", termLastIndex);
+        // maps every known term to last index of entries of previous term
+        termLastIndex.tailMap(newLastTerm, false).clear(); // forget about any newer terms
+        log.debug("termLastIndex after: {}", termLastIndex);
 
-            // set bytes offset to last known value (maybe not very exact?)
-            lastIndexWrittenAt = lastIndexEntry.getValue();
+        final long lastTermSwitchIndex = termLastIndex.lastEntry().getValue(); // assume there is at least one entry
+        log.debug("lastTermSwitchIndex: {}", lastTermSwitchIndex);
 
-            // remove all records after
-            try (final InputStream is = Channels.newInputStream(offsetIndexChannel);
-                 final BufferedInputStream bis = new BufferedInputStream(is);
-                 final DataInputStream dis = new DataInputStream(bis)) {
+        log.debug("indexToTermMap before: {}", indexToTermMap);
+        // maps last index of each known term to its number
+        indexToTermMap.tailMap(lastTermSwitchIndex, false).clear(); // remove all later indexes
+        log.debug("indexToTermMap after: {}", indexToTermMap);
 
-                while (dis.available() != 0) {
-
-                    // read index record (16 bytes)
-                    final long lastIndex = dis.readLong();
-                    dis.readLong();
-
-                    if (lastIndex > lastIndexEntry.getKey()) {
-                        final long pos = offsetIndexChannel.position() - 16;
-                        offsetIndexChannel.position(pos);
-                        offsetIndexChannel.truncate(pos);
-                        return;
-                    }
-                }
-            }
+        if (indexToTermMap.size() != termLastIndex.size()) {
+            throw new IllegalStateException("indexToTermMap size does not match to termLastIndex");
         }
+
+        lastIndex = removeAfter;
+        lastLogTerm = newLastTerm;
+
+        // doing log truncation
+        log.debug("performing log truncation: {} bytes ...", logTruncateOffset);
+        logWriteChannel.position(logTruncateOffset);
+        logWriteChannel.truncate(logTruncateOffset);
+        writtenBytes = logTruncateOffset;
+
+        final int newOffsetIndexSize = offsetIndex.size() * 16;
+        log.debug("performing offset index truncation: {} bytes ...", newOffsetIndexSize);
+        offsetIndexChannel.position(newOffsetIndexSize);
+        offsetIndexChannel.truncate(newOffsetIndexSize);
+
+        final int newTermIndexSize = indexToTermMap.size() * 16;
+        log.debug("performing term index truncation: {} bytes ...", newTermIndexSize);
+        termIndexChannel.position(newTermIndexSize);
+        termIndexChannel.truncate(newTermIndexSize);
+
+        log.debug("truncateLog completed");
     }
 
+    /**
+     * Possible scenario when every entry is not matching - it is okay, because term/index verified previously and common entry is found
+     */
     private long verifyTerms(List<RaftLogEntry<T>> newEntries, long prevLogIndex) {
 
         log.info("Verify terms: requesting {} entries starting from {}", newEntries.size(), prevLogIndex);
@@ -395,7 +416,7 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
             }
         }
 
-        log.info("All iterms are matching");
+        log.info("All items are matching");
         return -1;
     }
 
@@ -403,7 +424,7 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
      * @return offset+index to start looking from
      */
     private LongLongPair findStartingIndexPoint(long indexFrom) {
-        final Map.Entry<Long, Long> entry = currentOffsetIndex.floorEntry(indexFrom);
+        final Map.Entry<Long, Long> entry = offsetIndex.floorEntry(indexFrom);
         final long startOffset = (entry == null) ? 0L : entry.getValue();
         final long floorIndex = (entry == null) ? 1L : entry.getKey();
         return PrimitiveTuples.pair(startOffset, floorIndex);
@@ -489,12 +510,12 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
                     final long offset = dis.readLong();
 
                     log.debug("  index {} -> offset {}", idx, offset);
-                    currentOffsetIndex.put(idx, offset);
+                    offsetIndex.put(idx, offset);
                 }
             }
 
             {
-                final Map.Entry<Long, Long> lastIndexEntry = currentOffsetIndex.lastEntry();
+                final Map.Entry<Long, Long> lastIndexEntry = offsetIndex.lastEntry();
                 final long floorIndex = (lastIndexEntry == null) ? 0L : lastIndexEntry.getKey();
                 final long startOffset = (lastIndexEntry == null) ? 0L : lastIndexEntry.getValue();
 
@@ -565,6 +586,9 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
 
                     lastLogTerm = term;
                 }
+
+                log.debug("termLastIndex={}", termLastIndex);
+                log.debug("indexToTermMap={}", indexToTermMap);
 
                 log.debug("lastLogTerm={}", lastLogTerm);
 
@@ -649,7 +673,7 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
 
                 log.debug("Adding index record:{}->{}", nextIndex, writtenBytes);
 
-                currentOffsetIndex.put(nextIndex, writtenBytes);
+                offsetIndex.put(nextIndex, writtenBytes);
 
                 offsetIndexWriteBuffer.putLong(nextIndex);
                 offsetIndexWriteBuffer.putLong(writtenBytes);

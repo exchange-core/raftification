@@ -8,3 +8,6 @@ target/
 *.iws
 *.iml
 *.ipr
+
+raftlogs/
+

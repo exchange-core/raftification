@@ -26,7 +26,7 @@ public class RaftDiskLogConfig {
     private final int journalBufferFlushTrigger = 65536;
     private final long journalFileMaxSize = 2_000_000_000;
 
-    private final int indexRecordEveryNBytes = 4096;
+    private final int indexRecordEveryNBytes = 1024; // 4096
 
     private final String exchangeId;
 
