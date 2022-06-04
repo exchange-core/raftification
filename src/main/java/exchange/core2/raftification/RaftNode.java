@@ -604,7 +604,7 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
 
             final RaftLogEntry<T> raftLogEntry = entriesToApply.get(idx++);
 
-            log.debug("Applying to RSM: {}", raftLogEntry);
+            log.debug("Applying to RSM idx={} {}", lastApplied, raftLogEntry);
             final S result = rsm.applyCommand(raftLogEntry.cmd());
 
             if (currentState == RaftNodeState.LEADER) {

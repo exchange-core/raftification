@@ -34,10 +34,19 @@ public class RaftClient {
     public static void main(String[] args) throws IOException, InterruptedException {
         final RaftClient raftClient = new RaftClient();
 
-        int counter = 0;
-        Random random = new Random(1L);
+        final Random random = new Random(1L);
+        int counter = 1;
+        long val = 1_000_000L;
         while (true) {
-            raftClient.sendCommand(random.nextLong(), ++counter);
+
+            final boolean success = raftClient.sendCommand(val, counter);
+
+            if (success) {
+                counter++;
+                val = counter * 1_000_000L + random.nextInt(1_000_000);
+            }
+
+
             Thread.sleep(2000);
         }
     }
@@ -55,14 +64,16 @@ public class RaftClient {
         this.rpcClient = new RpcClient<>(remoteNodes, new CustomRsm());
     }
 
-    public void sendCommand(long data, int counter) {
+    public boolean sendCommand(long data, int counter) {
         try {
             log.info("send >>> {} data={}", counter, data);
             final CustomRsmResponse res = rpcClient.callRpcSync(new CustomRsmCommand(data), 500);
             log.info("recv <<< hash={}", res.hash());
+            return true;
         } catch (Exception ex) {
             log.warn("Exception: ", ex);
         }
+        return false;
     }
 
 }
