@@ -28,7 +28,6 @@ import java.net.InetAddress;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
 
@@ -96,9 +95,6 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
     private long lastHeartBeatReceivedNs = System.nanoTime();
     private long electionEndNs = System.nanoTime();
 
-    private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
-
-
     public RaftNode(int thisNodeId,
                     IRaftLogRepository<T> logRepository,
                     ReplicatedStateMachine<T, S> rsm,
@@ -121,9 +117,7 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
             public RpcResponse handleNodeRequest(int fromNodeId, RpcRequest req) {
                 log.debug("INCOMING REQ {} >>> {}", fromNodeId, req);
 
-                try {
-
-                    lock.writeLock().lock();
+                synchronized (rsm) {
 
                     if (req instanceof CmdRaftVoteRequest voteRequest) {
 
@@ -230,14 +224,9 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                             log.debug("set commitIndex to {}", commitIndex);
                         }
 
-                        // todo can do in different thread
-//                        applyPendingEntriesToStateMachine();
-
                         return CmdRaftAppendEntriesResponse.createSuccess(logRepository.getCurrentTerm());
                     }
 
-                } finally {
-                    lock.writeLock().unlock();
                 }
 
                 return null;
@@ -253,9 +242,7 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                 given term, on a first-come-first-served basis
                 (note: Section 5.4 adds an additional restriction on votes) */
 
-                try {
-
-                    lock.writeLock().lock();
+                synchronized (rsm) {
 
                     final int currentTerm = logRepository.getCurrentTerm();
 
@@ -294,8 +281,6 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
 
                                     commitIndex = newCommitIndex;
 
-                                    // TODO another thread
-                                    // applyPendingEntriesToStateMachine();
                                 }
 
                             } else {
@@ -320,10 +305,11 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                                     log.warn("Can not decrement nextIndex[{}]", fromNodeId);
                                 }
                             }
+
+                            // notify worker thread to send updates to followers
+                            rsm.notifyAll();
                         }
                     }
-                } finally {
-                    lock.writeLock().unlock();
                 }
             }
 
@@ -334,9 +320,7 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                                                                 final long correlationId,
                                                                 final long timeReceived,
                                                                 final CustomCommandRequest<T> request) {
-                try {
-
-                    lock.writeLock().lock();
+                synchronized (rsm) {
 
                     if (currentState == RaftNodeState.LEADER) {
                         // If command received from client: append entry to local log,
@@ -349,17 +333,17 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
 
                         // remember client request (TODO !! on batch migration - should refer to the last record)
                         final ClientAddress clientAddress = new ClientAddress(address, port, correlationId);
-                        clientResponsesMap.put(index, clientAddress);
                         log.debug("Saving {} for index {} to reply", index, clientAddress);
+                        clientResponsesMap.put(index, clientAddress);
 
+                        // notify worker thread to send updates to followers
+                        rsm.notifyAll();
                     } else {
                         log.debug("Redirecting client to leader nodeId={}", logRepository.getVotedFor());
                         // inform client about different leader
                         return new CustomCommandResponse<>(respFactory.emptyResponse(), logRepository.getVotedFor(), false);
                     }
 
-                } finally {
-                    lock.writeLock().unlock();
                 }
 
                 return null;
@@ -387,9 +371,10 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
 
             while (true) {
 
-                try {
+                synchronized (rsm) {
 
-                    lock.writeLock().lock();
+                    // wait for notification from UDP messages handler
+                    rsm.wait(100);
 
                     if (currentState == RaftNodeState.FOLLOWER) {
 
@@ -420,11 +405,7 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
 
                     applyPendingEntriesToStateMachine();
 
-                } finally {
-                    lock.writeLock().unlock();
                 }
-
-                Thread.sleep(10);
             }
 
         } catch (InterruptedException e) {
@@ -503,13 +484,10 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
 
     private void resetFollowerAppendTimer() {
 //        logger.debug("reset append timer");
-        try {
-            lock.writeLock().lock();
+        synchronized (rsm) {
 
             lastHeartBeatReceivedNs = System.nanoTime();
 
-        } finally {
-            lock.writeLock().unlock();
         }
     }
 
@@ -524,8 +502,7 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
      * (c) a period of time goes by with no winner.
      */
     private void appendTimeout() {
-        try {
-            lock.writeLock().lock();
+        synchronized (rsm) {
             // TODO double-check last receiving time
 
             currentState = RaftNodeState.CANDIDATE;
@@ -557,8 +534,6 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
             final int timeoutMs = ELECTION_TIMEOUT_MIN_MS + (int) (Math.random() * (ELECTION_TIMEOUT_MAX_MS - ELECTION_TIMEOUT_MIN_MS));
             log.debug("ElectionTimeout: {}ms", timeoutMs);
             electionEndNs = System.nanoTime() + timeoutMs * 1_000_000L;
-        } finally {
-            lock.writeLock().unlock();
         }
     }
 
@@ -621,6 +596,8 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                             clientAddress.port,
                             clientAddress.correlationId,
                             new CustomCommandResponse<>(result, currentNodeId, true));
+
+                    log.debug("Response sent to the client");
                 } else {
                     log.warn("Can not reply client - unknown requestor for lastApplied={}", lastApplied);
                 }
