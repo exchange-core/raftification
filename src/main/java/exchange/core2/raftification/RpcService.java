@@ -30,7 +30,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
-public class RpcService<T extends RsmRequest, S extends RsmResponse> implements AutoCloseable {
+public class RpcService<T extends RsmCommand, Q extends RsmQuery, S extends RsmResponse> implements AutoCloseable {
 
     private static final Logger logger = LoggerFactory.getLogger(RpcService.class);
 
@@ -39,8 +39,8 @@ public class RpcService<T extends RsmRequest, S extends RsmResponse> implements 
     private final Map<Integer, RaftUtils.RemoteUdpSocket> socketMap;
     private final int serverPort;
     private final int serverNodeId;
-    private final RpcHandler<T, S> handler;
-    private final RsmRequestFactory<T> msgFactory;
+    private final RpcHandler<T, Q, S> handler;
+    private final RsmRequestFactory<T, Q> requestFactory;
     private final RsmResponseFactory<S> responseFactory;
 
     private final DatagramSocket serverSocket;
@@ -48,8 +48,8 @@ public class RpcService<T extends RsmRequest, S extends RsmResponse> implements 
     private volatile boolean active = true;
 
     public RpcService(Map<Integer, String> remoteNodes,
-                      RpcHandler<T, S> handler,
-                      RsmRequestFactory<T> msgFactory,
+                      RpcHandler<T, Q, S> handler,
+                      RsmRequestFactory<T, Q> requestFactory,
                       RsmResponseFactory<S> responseFactory,
                       int serverNodeId) {
 
@@ -57,7 +57,7 @@ public class RpcService<T extends RsmRequest, S extends RsmResponse> implements 
         this.handler = handler;
         this.serverPort = socketMap.get(serverNodeId).port;
         this.serverNodeId = serverNodeId;
-        this.msgFactory = msgFactory;
+        this.requestFactory = requestFactory;
         this.responseFactory = responseFactory;
 
         try {
@@ -66,12 +66,10 @@ public class RpcService<T extends RsmRequest, S extends RsmResponse> implements 
             throw new RuntimeException(ex);
         }
 
-        Thread t = new Thread(this::run);
-        t.setDaemon(true);
-        t.setName("ListenerUDP");
-        t.start();
-
-
+        final Thread thread = new Thread(this::run);
+        thread.setDaemon(true);
+        thread.setName("ListenerUDP");
+        thread.start();
     }
 
 
@@ -100,39 +98,76 @@ public class RpcService<T extends RsmRequest, S extends RsmResponse> implements 
 
                 logger.debug("RECEIVED from {} mt={}: {}", nodeId, messageType, PrintBufferUtil.hexDump(receivePacket.getData(), 0, receivePacket.getLength()));
 
-                final RpcMessage msg = RaftUtils.createMessageByType(messageType, bb, msgFactory, responseFactory);
                 // TODO use msgFactory
 
                 if (messageType < 0) {
                     // handler response
 
+                    final RpcResponse msg = RaftUtils.createResponseByType(messageType, bb, responseFactory);
+
                     final CompletableFuture<RpcResponse> future = futureMap.remove(correlationId);
                     if (future != null) {
                         // complete future for future-based-calls
-                        future.complete((RpcResponse) msg);
+                        future.complete(msg);
                     } else {
                         // handle response for full-async-calls
-                        handler.handleNodeResponse(nodeId, (RpcResponse) msg, correlationId);
+                        handler.handleNodeResponse(nodeId, msg, correlationId);
                     }
 
                 } else {
 
-                    if (msg instanceof CustomCommandRequest) {
+                    final RpcRequest msg = RaftUtils.createRequestByType(messageType, bb, requestFactory);
+
+                    if (msg instanceof CustomCommand msgCmd) {
+                        // command from client
+
+                        final InetAddress address = receivePacket.getAddress();
+                        final int port = receivePacket.getPort();
+
+                        // todo change to more precise timestamp (provider?)
+                        final long timeReceived = System.currentTimeMillis();
+
+                        final CustomResponse<S> response = handler.handleClientCommand(
+                                address,
+                                port,
+                                correlationId,
+                                timeReceived,
+                                (CustomCommand<T>) msgCmd);
+
+                        if (response != null) {
+                            respondToClient(address, port, correlationId, response);
+                        }
+
+                    } else if (msg instanceof CustomQuery msgQ) {
+
+                        // query from client
+
+                        final InetAddress address = receivePacket.getAddress();
+                        final int port = receivePacket.getPort();
+
+                        final CustomResponse<S> response =
+                                handler.handleClientQuery(
+                                        address,
+                                        port,
+                                        correlationId,
+                                        (CustomQuery<Q>) msgQ);
+
+                        if (response != null) {
+                            respondToClient(address, port, correlationId, response);
+                        }
+
+
+                    } else if (msg instanceof NodeStatusRequest nodeStatusRequest) {
                         // request from client
 
                         final InetAddress address = receivePacket.getAddress();
                         final int port = receivePacket.getPort();
 
-                        final CustomCommandRequest<T> msgT = (CustomCommandRequest<T>) msg;
-
-                        final long timeReceived = System.currentTimeMillis();
-
-                        final CustomCommandResponse<S> response = handler.handleClientRequest(
+                        final NodeStatusResponse response = handler.handleNodeStatusRequest(
                                 address,
                                 port,
                                 correlationId,
-                                timeReceived,
-                                msgT);
+                                nodeStatusRequest);
 
                         if (response != null) {
                             respondToClient(address, port, correlationId, response);
@@ -140,7 +175,7 @@ public class RpcService<T extends RsmRequest, S extends RsmResponse> implements 
 
                     } else {
                         // handle request
-                        final RpcResponse response = handler.handleNodeRequest(nodeId, (RpcRequest) msg);
+                        final RpcResponse response = handler.handleNodeRequest(nodeId, msg);
                         // send response
                         if (response != null) {
                             sendResponse(nodeId, correlationId, response);
@@ -226,6 +261,7 @@ public class RpcService<T extends RsmRequest, S extends RsmResponse> implements 
         final ByteBuffer bb = ByteBuffer.wrap(array);
 
         // put only correlationId into the header
+        bb.putInt(response.getMessageType());
         bb.putLong(correlationId);
         response.serialize(bb);
 

@@ -18,7 +18,7 @@
 package exchange.core2.raftification.repository;
 
 import exchange.core2.raftification.messages.RaftLogEntry;
-import exchange.core2.raftification.messages.RsmRequest;
+import exchange.core2.raftification.messages.RsmCommand;
 
 import java.util.List;
 
@@ -27,7 +27,7 @@ import java.util.List;
  *
  * @param <T> - request records type for particular Replicated State Machine
  */
-public interface IRaftLogRepository<T extends RsmRequest> extends AutoCloseable {
+public interface IRaftLogRepository<T extends RsmCommand> extends AutoCloseable {
 
     /**
      * @return last entry index (starting from 1), or 0 if there are no entries.
@@ -86,6 +86,8 @@ public interface IRaftLogRepository<T extends RsmRequest> extends AutoCloseable 
      */
     void appendOrOverride(List<RaftLogEntry<T>> newEntries, long prevLogIndex);
 
+
+    int calculateLogHash(long lastApplied);
 
     // latest term server has seen (initialized to 0 on first boot, increases monotonically)
 

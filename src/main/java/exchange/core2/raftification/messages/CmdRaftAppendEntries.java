@@ -26,7 +26,7 @@ import java.util.List;
 /**
  * Invoked by leader to replicate log entries (5.3); also used as heartbeat (5.2).
  */
-public record CmdRaftAppendEntries<T extends RsmRequest>(int term,
+public record CmdRaftAppendEntries<T extends RsmCommand>(int term,
                                                          int leaderId,
                                                          long prevLogIndex,
                                                          int prevLogTerm,
@@ -49,9 +49,9 @@ public record CmdRaftAppendEntries<T extends RsmRequest>(int term,
         buffer.putLong(leaderCommit);
     }
 
-    public static <T extends RsmRequest> CmdRaftAppendEntries<T> create(
+    public static <T extends RsmCommand> CmdRaftAppendEntries<T> create(
             ByteBuffer buffer,
-            RsmRequestFactory<T> factory) {
+            RsmRequestFactory<T, ?> factory) {
 
         final int term = buffer.getInt();
         final int leaderId = buffer.getInt();

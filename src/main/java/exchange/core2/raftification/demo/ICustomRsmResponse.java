@@ -15,29 +15,9 @@
  *
  */
 
-package exchange.core2.raftification;
+package exchange.core2.raftification.demo;
 
-import exchange.core2.raftification.messages.RsmCommand;
-import exchange.core2.raftification.messages.RsmQuery;
 import exchange.core2.raftification.messages.RsmResponse;
-import net.openhft.chronicle.bytes.WriteBytesMarshallable;
 
-public interface ReplicatedStateMachine<T extends RsmCommand, Q extends RsmQuery, S extends RsmResponse> extends WriteBytesMarshallable {
-
-    /**
-     * Changes state of Replicated State Machine
-     *
-     * @param command command
-     * @return result
-     */
-    S applyCommand(T command);
-
-    /**
-     * Execute a query that does not change the state
-     *
-     * @param query query
-     * @return query result
-     */
-    S applyQuery(Q query);
-
+public interface ICustomRsmResponse extends RsmResponse {
 }

@@ -22,16 +22,47 @@ import exchange.core2.raftification.RsmRequestFactory;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.Objects;
 
 /**
  * each entry contains command for state machine, and term when entry was received by leader
  */
-public record RaftLogEntry<T extends RsmRequest>(int term, T cmd, long timestamp) {
+public record RaftLogEntry<T extends RsmCommand>(int term, T cmd, long timestamp) {
+
+    public static <T extends RsmCommand> RaftLogEntry<T> create(ByteBuffer buffer,
+                                                                RsmRequestFactory<T, ?> factory) {
+        final int term = buffer.getInt();
+        final long timestamp = buffer.getLong();
+        final T cmd = factory.createCommand(buffer);
+        return new RaftLogEntry<>(term, cmd, timestamp);
+    }
+
+    public static <T extends RsmCommand> RaftLogEntry<T> create(DataInputStream dis,
+                                                                RsmRequestFactory<T, ?> factory) throws IOException {
+        final int term = dis.readInt();
+        final long timestamp = dis.readLong();
+        final T cmd = factory.createCommand(dis);
+        return new RaftLogEntry<>(term, cmd, timestamp);
+    }
 
     public void serialize(ByteBuffer buffer) {
         buffer.putInt(term);
         buffer.putLong(timestamp);
         cmd.serialize(buffer);
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        RaftLogEntry<?> that = (RaftLogEntry<?>) o;
+        return term == that.term && timestamp == that.timestamp && Objects.equals(cmd, that.cmd);
+    }
+
+    @Override
+    public int hashCode() {
+        // timestamp is assigned by leader - so it should be included
+        return Objects.hash(term, cmd, timestamp);
     }
 
     @Override
@@ -42,19 +73,4 @@ public record RaftLogEntry<T extends RsmRequest>(int term, T cmd, long timestamp
                 '}';
     }
 
-    public static <T extends RsmRequest> RaftLogEntry<T> create(ByteBuffer buffer,
-                                                                RsmRequestFactory<T> factory) {
-        final int term = buffer.getInt();
-        final long timestamp = buffer.getLong();
-        final T cmd = factory.createRequest(buffer);
-        return new RaftLogEntry<>(term, cmd, timestamp);
-    }
-
-    public static <T extends RsmRequest> RaftLogEntry<T> create(DataInputStream dis,
-                                                                RsmRequestFactory<T> factory) throws IOException {
-        final int term = dis.readInt();
-        final long timestamp = dis.readLong();
-        final T cmd = factory.createRequest(dis);
-        return new RaftLogEntry<>(term, cmd, timestamp);
-    }
 }

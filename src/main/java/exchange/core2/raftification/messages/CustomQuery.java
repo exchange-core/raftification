@@ -25,30 +25,30 @@ import java.nio.ByteBuffer;
 
 // TODO support batching !!
 
-public record CustomCommandRequest<T extends RsmRequest>(T rsmRequest) implements RpcRequest {
+public record CustomQuery<Q extends RsmQuery>(Q rsmQuery) implements RpcRequest {
 
     @Override
     public int getMessageType() {
-        return REQUEST_CUSTOM;
+        return QUERY_CUSTOM;
     }
 
     @Override
     public void serialize(ByteBuffer buffer) {
-        rsmRequest.serialize(buffer);
+        rsmQuery.serialize(buffer);
     }
 
-    public static <T extends RsmRequest> CustomCommandRequest<T> create(
+    public static <Q extends RsmQuery> CustomQuery<Q> create(
             final ByteBuffer buffer,
-            final RsmRequestFactory<T> factory) {
+            final RsmRequestFactory<?, Q> factory) {
 
-        return new CustomCommandRequest<>(factory.createRequest(buffer));
+        return new CustomQuery<>(factory.createQuery(buffer));
     }
 
 
-    public static <T extends RsmRequest> CustomCommandRequest<T> create(
+    public static <Q extends RsmQuery> CustomQuery<Q> create(
             final DataInputStream dis,
-            final RsmRequestFactory<T> factory) throws IOException {
+            final RsmRequestFactory<?, Q> factory) throws IOException {
 
-        return new CustomCommandRequest<>(factory.createRequest(dis));
+        return new CustomQuery<>(factory.createQuery(dis));
     }
 }

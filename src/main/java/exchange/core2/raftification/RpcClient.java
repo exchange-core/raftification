@@ -17,10 +17,7 @@
 
 package exchange.core2.raftification;
 
-import exchange.core2.raftification.messages.CustomCommandRequest;
-import exchange.core2.raftification.messages.CustomCommandResponse;
-import exchange.core2.raftification.messages.RsmRequest;
-import exchange.core2.raftification.messages.RsmResponse;
+import exchange.core2.raftification.messages.*;
 import org.agrona.PrintBufferUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,12 +37,12 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
-public class RpcClient<T extends RsmRequest, S extends RsmResponse> {
+public class RpcClient<T extends RsmCommand, S extends RsmResponse> {
 
     private static final Logger logger = LoggerFactory.getLogger(RpcClient.class);
 
     private final AtomicLong correlationIdCounter = new AtomicLong(1L);
-    private final Map<Long, CompletableFuture<CustomCommandResponse<S>>> futureMap = new ConcurrentHashMap<>();
+    private final Map<Long, CompletableFuture<RpcResponse>> futureMap = new ConcurrentHashMap<>();
     private final Map<Integer, RaftUtils.RemoteUdpSocket> socketMap;
     private final RsmResponseFactory<S> msgFactory;
 
@@ -88,16 +85,21 @@ public class RpcClient<T extends RsmRequest, S extends RsmResponse> {
 
                 final ByteBuffer bb = ByteBuffer.wrap(receivePacket.getData(), 0, receivePacket.getLength());
 
+                final int msgType = bb.getInt();
+
                 final long correlationId = bb.getLong();
 
                 logger.debug("RECEIVED from {} (c={}): {}", receivePacket.getAddress(), correlationId, PrintBufferUtil.hexDump(receivePacket.getData(), 0, receivePacket.getLength()));
 
-                final CustomCommandResponse<S> msg = CustomCommandResponse.create(bb, msgFactory);
-
-                final CompletableFuture<CustomCommandResponse<S>> future = futureMap.remove(correlationId);
+                final CompletableFuture<RpcResponse> future = futureMap.remove(correlationId);
                 if (future != null) {
                     // complete future for future-based-calls
+
+                    final RpcResponse msg = (msgType == RpcMessage.RESPONSE_NODE_STATUS)
+                            ? NodeStatusResponse.create(bb)
+                            : CustomResponse.create(bb, msgFactory);
                     future.complete(msg);
+
                 } else {
                     logger.warn("Unexpected response with correlationId={}", correlationId);
                 }
@@ -124,18 +126,18 @@ public class RpcClient<T extends RsmRequest, S extends RsmResponse> {
         for (int i = 0; i < 5; i++) {
 
             final long correlationId = correlationIdCounter.incrementAndGet();
-            final CompletableFuture<CustomCommandResponse<S>> future = new CompletableFuture<>();
+            final CompletableFuture<RpcResponse> future = new CompletableFuture<>();
             futureMap.put(correlationId, future);
 
-            final CustomCommandRequest<T> request = new CustomCommandRequest<>(data);
+            final CustomCommand<T> request = new CustomCommand<>(data);
 
             // send request to last known leader
-            callRpc(request, leaderNodeIdLocal, correlationId);
+            callRequest(request, leaderNodeIdLocal, correlationId);
 
             try {
 
                 // block waiting for response
-                final CustomCommandResponse<S> response = future.get(timeoutMs, TimeUnit.MILLISECONDS);
+                final CustomResponse<S> response = (CustomResponse<S>) future.get(timeoutMs, TimeUnit.MILLISECONDS);
 
                 if (response.success()) {
 
@@ -180,7 +182,21 @@ public class RpcClient<T extends RsmRequest, S extends RsmResponse> {
         throw new TimeoutException();
     }
 
-    private void callRpc(CustomCommandRequest<T> request, int toNodeId, long correlationId) {
+    public CompletableFuture<? extends RpcResponse> callRpcAsync(final int nodeId,
+                                                                 final RpcRequest request) {
+
+        final long correlationId = correlationIdCounter.incrementAndGet();
+        final CompletableFuture<RpcResponse> future = new CompletableFuture<>();
+        futureMap.put(correlationId, future);
+
+        // send request to last known leader
+        callRequest(request, nodeId, correlationId);
+
+        return future;
+    }
+
+
+    private void callRequest(RpcRequest request, int toNodeId, long correlationId) {
 
         final byte[] array = new byte[64];
         ByteBuffer bb = ByteBuffer.wrap(array);
@@ -191,11 +207,10 @@ public class RpcClient<T extends RsmRequest, S extends RsmResponse> {
 
         request.serialize(bb);
 
-        send(toNodeId, array, bb.position());
+        sendData(toNodeId, array, bb.position());
     }
 
-
-    private void send(int nodeId, byte[] data, int length) {
+    private void sendData(int nodeId, byte[] data, int length) {
 
         final RaftUtils.RemoteUdpSocket remoteUdpSocket = socketMap.get(nodeId);
 

@@ -18,14 +18,14 @@
 package exchange.core2.raftification.repository;
 
 import exchange.core2.raftification.messages.RaftLogEntry;
-import exchange.core2.raftification.messages.RsmRequest;
+import exchange.core2.raftification.messages.RsmCommand;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
 
-public class RaftMemLogRepository<T extends RsmRequest> implements IRaftLogRepository<T> {
+public class RaftMemLogRepository<T extends RsmCommand> implements IRaftLogRepository<T> {
 
     private static final Logger log = LoggerFactory.getLogger(RaftMemLogRepository.class);
 
@@ -74,20 +74,6 @@ public class RaftMemLogRepository<T extends RsmRequest> implements IRaftLogRepos
         return getLastLogIndex(); // starting from index=1
     }
 
-
-    // size = 5
-    // pos 0 1 2 3 4 5 6 7  <- array positions
-    // idx 1 2 3 4 5        <- existing records
-
-    // last        5
-    // new           6 7 8
-
-    // last    3
-    // check     4 5
-    // new           6 7 8
-
-    // TODO unittest
-
     @Override
     public void appendOrOverride(final List<RaftLogEntry<T>> newEntries, long prevLogIndex) {
 
@@ -119,6 +105,11 @@ public class RaftMemLogRepository<T extends RsmRequest> implements IRaftLogRepos
                 logEntries.add(newEntry); // TODO inefficient, because normally records are simply appended as batch
             }
         }
+    }
+
+    @Override
+    public int calculateLogHash(long lastApplied) {
+        throw new UnsupportedOperationException("not implemented");
     }
 
     @Override

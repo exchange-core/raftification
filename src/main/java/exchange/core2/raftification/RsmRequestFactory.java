@@ -17,16 +17,21 @@
 
 package exchange.core2.raftification;
 
-import exchange.core2.raftification.messages.RsmRequest;
+import exchange.core2.raftification.messages.RsmCommand;
+import exchange.core2.raftification.messages.RsmQuery;
 
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 
-public interface RsmRequestFactory<T extends RsmRequest> {
+public interface RsmRequestFactory<C extends RsmCommand, Q extends RsmQuery> {
 
-    T createRequest(ByteBuffer buffer);
+    C createCommand(ByteBuffer buffer);
 
-    T createRequest(DataInputStream dis) throws IOException;
+    C createCommand(DataInputStream dis) throws IOException;
+
+    Q createQuery(ByteBuffer buffer);
+
+    Q createQuery(DataInputStream dis) throws IOException;
 
 }

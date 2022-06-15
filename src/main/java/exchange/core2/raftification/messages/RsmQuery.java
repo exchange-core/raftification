@@ -17,25 +17,7 @@
 
 package exchange.core2.raftification.messages;
 
-import java.nio.ByteBuffer;
+public interface RsmQuery extends SerializableMessage {
 
-public interface RpcMessage {
-
-    int getMessageType();
-
-    void serialize(ByteBuffer buffer);
-
-    int REQUEST_APPEND_ENTRIES = 1;
-    int RESPONSE_APPEND_ENTRIES = -1;
-
-    int REQUEST_VOTE = 2;
-    int RESPONSE_VOTE = -2;
-
-    int REQUEST_NODE_STATUS = 8;
-    int RESPONSE_NODE_STATUS = -8;
-
-    int COMMAND_CUSTOM = 10;
-    int QUERY_CUSTOM = 11;
-    int RESPONSE_CUSTOM = -12;
 
 }

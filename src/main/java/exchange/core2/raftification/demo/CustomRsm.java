@@ -28,36 +28,66 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 
 public class CustomRsm implements
-        ReplicatedStateMachine<CustomRsmCommand, CustomRsmResponse>,
-        RsmRequestFactory<CustomRsmCommand>,
-        RsmResponseFactory<CustomRsmResponse> {
+        ReplicatedStateMachine<ICustomRsmCommand, ICustomRsmQuery, ICustomRsmResponse>,
+        RsmRequestFactory<ICustomRsmCommand, ICustomRsmQuery>,
+        RsmResponseFactory<ICustomRsmResponse> {
 
-    public static final CustomRsmResponse EMPTY_RSM_RESPONSE = new CustomRsmResponse(0);
+    public static final ICustomRsmResponse EMPTY_RSM_RESPONSE = new CustomRsmResponse(0);
 
     // state
     private int hash = 0;
+    private long lastData = 0L;
+
+    public CustomRsm() {
+        this.hash = 0;
+        this.lastData = 0L;
+    }
+
+
+    public CustomRsm(int hash, long lastData) {
+        this.hash = hash;
+        this.lastData = lastData;
+    }
 
     @Override
-    public CustomRsmResponse applyCommand(CustomRsmCommand cmd) {
-        hash = Hashing.hash(hash ^ Hashing.hash(cmd.data()));
+    public CustomRsmResponse applyCommand(ICustomRsmCommand cmd) {
+
+        if (cmd instanceof CustomRsmCommand cmd1) {
+
+            hash = Hashing.hash(hash ^ Hashing.hash(cmd1.data()));
+            lastData = cmd1.data();
+        } else {
+            throw new IllegalStateException("Unknown command " + cmd);
+        }
+
         return new CustomRsmResponse(hash);
     }
 
     @Override
-    public CustomRsmResponse applyQuery(CustomRsmCommand query) {
+    public ICustomRsmResponse applyQuery(ICustomRsmQuery query) {
         // can not change anything
         return new CustomRsmResponse(hash);
     }
 
     @Override
-    public CustomRsmCommand createRequest(ByteBuffer buffer) {
+    public CustomRsmCommand createCommand(ByteBuffer buffer) {
         return CustomRsmCommand.create(buffer);
     }
 
     @Override
-    public CustomRsmCommand createRequest(DataInputStream dis) throws IOException {
+    public CustomRsmCommand createCommand(DataInputStream dis) throws IOException {
 
         return CustomRsmCommand.create(dis);
+    }
+
+    @Override
+    public ICustomRsmQuery createQuery(ByteBuffer buffer) {
+        return null;
+    }
+
+    @Override
+    public ICustomRsmQuery createQuery(DataInputStream dis) throws IOException {
+        return null;
     }
 
     @Override
@@ -66,12 +96,14 @@ public class CustomRsm implements
     }
 
     @Override
-    public CustomRsmResponse emptyResponse() {
+    public ICustomRsmResponse emptyResponse() {
         return EMPTY_RSM_RESPONSE;
     }
 
     @Override
     public void writeMarshallable(BytesOut bytes) {
-        bytes.append(hash);
+
+        bytes.append(hash); // int
+        bytes.append(lastData); // long
     }
 }

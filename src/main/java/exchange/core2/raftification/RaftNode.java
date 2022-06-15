@@ -29,7 +29,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
-public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
+public class RaftNode<T extends RsmCommand, Q extends RsmQuery, S extends RsmResponse> {
 
     private static final Logger log = LoggerFactory.getLogger(RaftNode.class);
 
@@ -87,9 +87,10 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
     private final int currentNodeId;
     private final int[] otherNodes;
 
-    private final RpcService<T, S> rpcService;
+    private final RpcService<T, Q, S> rpcService;
 
-    private final ReplicatedStateMachine<T, S> rsm;
+    // replicated state machine implementation
+    private final ReplicatedStateMachine<T, Q, S> rsm;
 
     // timers
     private long lastHeartBeatReceivedNs = System.nanoTime();
@@ -97,8 +98,8 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
 
     public RaftNode(int thisNodeId,
                     IRaftLogRepository<T> logRepository,
-                    ReplicatedStateMachine<T, S> rsm,
-                    RsmRequestFactory<T> msgFactory,
+                    ReplicatedStateMachine<T, Q, S> rsm,
+                    RsmRequestFactory<T, Q> msgFactory,
                     RsmResponseFactory<S> respFactory) {
 
         // localhost:3778, localhost:3779, localhost:3780
@@ -112,7 +113,7 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
         this.rsm = rsm;
         this.otherNodes = remoteNodes.keySet().stream().mapToInt(x -> x).filter(nodeId -> nodeId != thisNodeId).toArray();
 
-        final RpcHandler<T, S> handler = new RpcHandler<>() {
+        final RpcHandler<T, Q, S> handler = new RpcHandler<>() {
             @Override
             public RpcResponse handleNodeRequest(int fromNodeId, RpcRequest req) {
                 log.debug("INCOMING REQ {} >>> {}", fromNodeId, req);
@@ -315,11 +316,11 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
 
 
             @Override
-            public CustomCommandResponse<S> handleClientRequest(final InetAddress address,
-                                                                final int port,
-                                                                final long correlationId,
-                                                                final long timeReceived,
-                                                                final CustomCommandRequest<T> request) {
+            public CustomResponse<S> handleClientCommand(final InetAddress address,
+                                                         final int port,
+                                                         final long correlationId,
+                                                         final long timeReceived,
+                                                         final CustomCommand<T> command) {
                 synchronized (rsm) {
 
                     if (currentState == RaftNodeState.LEADER) {
@@ -328,7 +329,7 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
 
                         // adding new record into the local log
                         log.debug("adding new record into the local log...");
-                        final RaftLogEntry<T> logEntry = new RaftLogEntry<>(logRepository.getCurrentTerm(), request.rsmRequest(), timeReceived);
+                        final RaftLogEntry<T> logEntry = new RaftLogEntry<>(logRepository.getCurrentTerm(), command.rsmCommand(), timeReceived);
                         final long index = logRepository.appendEntry(logEntry, true);
 
                         // remember client request (TODO !! on batch migration - should refer to the last record)
@@ -338,17 +339,54 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
 
                         // notify worker thread to send updates to followers
                         rsm.notifyAll();
+
+                        // response will be returned later
+                        return null;
+
                     } else {
                         log.debug("Redirecting client to leader nodeId={}", logRepository.getVotedFor());
                         // inform client about different leader
-                        return new CustomCommandResponse<>(respFactory.emptyResponse(), logRepository.getVotedFor(), false);
+                        return new CustomResponse<>(respFactory.emptyResponse(), logRepository.getVotedFor(), false);
                     }
 
                 }
-
-                return null;
             }
 
+            @Override
+            public CustomResponse<S> handleClientQuery(InetAddress address, int port, long correlationId, CustomQuery<Q> query) {
+                synchronized (rsm) {
+                    // just apply query instantly
+                    final S result = rsm.applyQuery(query.rsmQuery());
+                    return new CustomResponse<>(result, logRepository.getVotedFor(), false);
+                }
+            }
+
+            @Override
+            public NodeStatusResponse handleNodeStatusRequest(final InetAddress address,
+                                                              final int port,
+                                                              final long correlationId,
+                                                              final NodeStatusRequest request) {
+                synchronized (rsm) {
+
+                    log.debug("NodeStatusRequest received correlationId={}", correlationId);
+
+                    final int committedLogHash = logRepository.calculateLogHash(lastApplied);
+
+                    final boolean isLeader = currentState == RaftNodeState.LEADER;
+                    final int leaderNodeId = isLeader ? thisNodeId : logRepository.getVotedFor();
+
+
+                    final NodeStatusResponse response = new NodeStatusResponse(committedLogHash,
+                            logRepository.getLastLogIndex(),
+                            lastApplied,
+                            leaderNodeId,
+                            isLeader);
+
+                    log.debug("Responding: {}", response);
+
+                    return response;
+                }
+            }
         };
 
         // todo remove from constructor
@@ -595,7 +633,7 @@ public class RaftNode<T extends RsmRequest, S extends RsmResponse> {
                             clientAddress.address,
                             clientAddress.port,
                             clientAddress.correlationId,
-                            new CustomCommandResponse<>(result, currentNodeId, true));
+                            new CustomResponse<>(result, currentNodeId, true));
 
                     log.debug("Response sent to the client");
                 } else {

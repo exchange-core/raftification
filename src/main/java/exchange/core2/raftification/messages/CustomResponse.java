@@ -21,9 +21,9 @@ import exchange.core2.raftification.RsmResponseFactory;
 
 import java.nio.ByteBuffer;
 
-public record CustomCommandResponse<S extends RsmResponse>(S rsmResponse,
-                                                           int leaderNodeId,
-                                                           boolean success) implements RpcResponse {
+public record CustomResponse<S extends RsmResponse>(S rsmResponse,
+                                                    int leaderNodeId,
+                                                    boolean success) implements RpcResponse {
 
     @Override
     public int getMessageType() {
@@ -37,13 +37,13 @@ public record CustomCommandResponse<S extends RsmResponse>(S rsmResponse,
         rsmResponse.serialize(buffer);
     }
 
-    public static <S extends RsmResponse> CustomCommandResponse<S> create(ByteBuffer buffer, RsmResponseFactory<S> factory) {
+    public static <S extends RsmResponse> CustomResponse<S> create(ByteBuffer buffer, RsmResponseFactory<S> factory) {
 
         final int leaderNodeId = buffer.getInt();
         final boolean success = buffer.getInt() == 1;
         final S rsmResponse = factory.createResponse(buffer);
 
-        return new CustomCommandResponse<>(rsmResponse, leaderNodeId, success);
+        return new CustomResponse<>(rsmResponse, leaderNodeId, success);
     }
 
 }

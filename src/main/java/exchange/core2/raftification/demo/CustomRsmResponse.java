@@ -17,11 +17,9 @@
 
 package exchange.core2.raftification.demo;
 
-import exchange.core2.raftification.messages.RsmResponse;
-
 import java.nio.ByteBuffer;
 
-public record CustomRsmResponse(int hash) implements RsmResponse {
+public record CustomRsmResponse(int hash) implements ICustomRsmResponse {
 
     @Override
     public void serialize(ByteBuffer buffer) {

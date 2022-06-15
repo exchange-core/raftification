@@ -24,27 +24,39 @@ import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.Map;
 
-public class RaftUtils {
+public final class RaftUtils {
 
-
-    public static <T extends RsmRequest, S extends RsmResponse> RpcMessage createMessageByType(
-            int messageType,
-            ByteBuffer buffer,
-            RsmRequestFactory<T> factory,
-            RsmResponseFactory<S> responseFactory) {
+    public static <T extends RsmCommand, Q extends RsmQuery> RpcRequest createRequestByType(
+            final int messageType,
+            final ByteBuffer buffer,
+            final RsmRequestFactory<T, Q> requestFactory) {
 
         return switch (messageType) {
-            case RpcMessage.REQUEST_APPEND_ENTRIES -> CmdRaftAppendEntries.create(buffer, factory);
-            case RpcMessage.RESPONSE_APPEND_ENTRIES -> CmdRaftAppendEntriesResponse.create(buffer);
+            case RpcMessage.REQUEST_APPEND_ENTRIES -> CmdRaftAppendEntries.create(buffer, requestFactory);
             case RpcMessage.REQUEST_VOTE -> CmdRaftVoteRequest.create(buffer);
-            case RpcMessage.RESPONSE_VOTE -> CmdRaftVoteResponse.create(buffer);
-            case RpcMessage.REQUEST_CUSTOM -> CustomCommandRequest.create(buffer, factory);
-            case RpcMessage.RESPONSE_CUSTOM -> CustomCommandResponse.create(buffer, responseFactory);
-            default -> throw new IllegalArgumentException("Unknown messageType: " + messageType);
+            case RpcMessage.COMMAND_CUSTOM -> CustomCommand.create(buffer, requestFactory);
+            case RpcMessage.QUERY_CUSTOM -> CustomQuery.create(buffer, requestFactory);
+            case RpcMessage.REQUEST_NODE_STATUS -> NodeStatusRequest.create(buffer);
+            default -> throw new IllegalArgumentException("Unknown request messageType: " + messageType);
         };
     }
 
-    public static Map<Integer, RemoteUdpSocket> createHostMap(Map<Integer, String> remoteNodes) {
+
+    public static <S extends RsmResponse> RpcResponse createResponseByType(
+            final int messageType,
+            final ByteBuffer buffer,
+            final RsmResponseFactory<S> responseFactory) {
+
+        return switch (messageType) {
+            case RpcMessage.RESPONSE_APPEND_ENTRIES -> CmdRaftAppendEntriesResponse.create(buffer);
+            case RpcMessage.RESPONSE_VOTE -> CmdRaftVoteResponse.create(buffer);
+            case RpcMessage.RESPONSE_CUSTOM -> CustomResponse.create(buffer, responseFactory);
+            case RpcMessage.RESPONSE_NODE_STATUS -> NodeStatusResponse.create(buffer);
+            default -> throw new IllegalArgumentException("Unknown request messageType: " + messageType);
+        };
+    }
+
+    public static Map<Integer, RemoteUdpSocket> createHostMap(final Map<Integer, String> remoteNodes) {
 
         final Map<Integer, RemoteUdpSocket> socketMap = new HashMap<>();
 

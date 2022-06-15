@@ -35,7 +35,7 @@ public class CustomNode {
 
         final RaftDiskLogConfig raftDiskLogConfig = new RaftDiskLogConfig(folder, "EC2RT");
 
-        final RaftDiskLogRepository<CustomRsmCommand> repository = new RaftDiskLogRepository<>(customRsm, raftDiskLogConfig);
+        final RaftDiskLogRepository<ICustomRsmCommand> repository = new RaftDiskLogRepository<>(customRsm, raftDiskLogConfig);
 //        final IRaftLogRepository<CustomRsmCommand> repository = new RaftMemLogRepository<>();
 
         new RaftNode<>(thisNodeId, repository, customRsm, customRsm, customRsm);

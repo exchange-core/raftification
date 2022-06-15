@@ -21,16 +21,26 @@ import exchange.core2.raftification.messages.*;
 
 import java.net.InetAddress;
 
-public interface RpcHandler<T extends RsmRequest, S extends RsmResponse> {
+public interface RpcHandler<T extends RsmCommand, Q extends RsmQuery, S extends RsmResponse> {
 
     RpcResponse handleNodeRequest(int nodeId, RpcRequest request);
 
     void handleNodeResponse(int nodeId, RpcResponse response, long correlationId);
 
-    CustomCommandResponse<S> handleClientRequest(InetAddress address,
-                                                 int port,
-                                                 long correlationId,
-                                                 long timeReceived,
-                                                 CustomCommandRequest<T> request);
+    CustomResponse<S> handleClientCommand(InetAddress address,
+                                          int port,
+                                          long correlationId,
+                                          long timeReceived,
+                                          CustomCommand<T> command);
 
+    CustomResponse<S> handleClientQuery(InetAddress address,
+                                        int port,
+                                        long correlationId,
+                                        CustomQuery<Q> query);
+
+
+    NodeStatusResponse handleNodeStatusRequest(InetAddress address,
+                                               int port,
+                                               long correlationId,
+                                               NodeStatusRequest request);
 }

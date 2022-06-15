@@ -19,7 +19,7 @@ package exchange.core2.raftification.repository;
 
 import exchange.core2.raftification.RsmRequestFactory;
 import exchange.core2.raftification.messages.RaftLogEntry;
-import exchange.core2.raftification.messages.RsmRequest;
+import exchange.core2.raftification.messages.RsmCommand;
 import org.eclipse.collections.api.tuple.primitive.LongLongPair;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,7 +33,7 @@ import java.nio.file.Path;
 import java.util.*;
 import java.util.stream.Collectors;
 
-public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftLogRepository<T> {
+public final class RaftDiskLogRepository<T extends RsmCommand> implements IRaftLogRepository<T> {
 
     private static final Logger log = LoggerFactory.getLogger(RaftDiskLogRepository.class);
 
@@ -46,7 +46,7 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
     private final DiskTermIndex diskTermIndex;
 
     // request factory
-    private final RsmRequestFactory<T> rsmRequestFactory;
+    private final RsmRequestFactory<T, ?> rsmRequestFactory;
 
     private RandomAccessFile logRaf;
     private FileChannel logWriteChannel;
@@ -77,7 +77,7 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
     private SnapshotDescriptor lastSnapshotDescriptor = null; // todo implement
     private JournalDescriptor lastJournalDescriptor;
 
-    public RaftDiskLogRepository(RsmRequestFactory<T> rsmRequestFactory, RaftDiskLogConfig raftDiskLogConfig) {
+    public RaftDiskLogRepository(RsmRequestFactory<T, ?> rsmRequestFactory, RaftDiskLogConfig raftDiskLogConfig) {
         this.rsmRequestFactory = rsmRequestFactory;
         this.config = raftDiskLogConfig;
 
@@ -200,6 +200,34 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
         } catch (IOException ex) {
             throw new RuntimeException(ex);
         }
+    }
+
+    @Override
+    public int calculateLogHash(long lastApplied) {
+
+        // TODO take initial hash from most recent snapshot
+
+        final long indexFrom = 1L;
+
+        final LongLongPair indexStartingIndex = diskOffsetIndex.findStartingIndexPoint(indexFrom);
+        final long startOffset = indexStartingIndex.getOne();
+        final long floorIndex = indexStartingIndex.getTwo();
+
+        log.debug("calculateLogHash reading from {} - floorIndex:{} offset:{}", indexFrom, floorIndex, startOffset);
+
+        final int limit = (int) lastApplied;
+
+        final List<RaftLogEntry<T>> raftLogEntries = getRaftLogEntries(floorIndex, indexFrom, limit, startOffset);
+
+        int hash = 0;
+
+        for (RaftLogEntry<T> entry : raftLogEntries) {
+            final int entryHash = entry.hashCode();
+            hash = Objects.hash(hash, entryHash);
+            log.debug("hash: {} <- {}", hash, entryHash);
+        }
+
+        return hash;
     }
 
     @Override
@@ -489,6 +517,8 @@ public final class RaftDiskLogRepository<T extends RsmRequest> implements IRaftL
     }
 
     /**
+     * TODO convert to Stream ?
+     * <p>
      * Read entries from the log file
      *
      * @param floorIndex    - index of the first entry where the stream is positioned to

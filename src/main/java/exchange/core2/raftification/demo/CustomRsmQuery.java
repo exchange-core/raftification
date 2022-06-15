@@ -20,40 +20,35 @@ package exchange.core2.raftification.demo;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.Objects;
 
-public record CustomRsmCommand(long data) implements ICustomRsmCommand {
+public record CustomRsmQuery() implements ICustomRsmQuery {
 
     @Override
     public void serialize(ByteBuffer buffer) {
-        buffer.putLong(data);
+
     }
 
     @Override
     public String toString() {
-        return "CRC{" +
-                "data=" + data +
-                '}';
+        return "CRQ{}";
     }
 
-    public static CustomRsmCommand create(ByteBuffer buffer) {
-        return new CustomRsmCommand(buffer.getLong());
+    public static CustomRsmQuery create(ByteBuffer buffer) {
+        return new CustomRsmQuery();
     }
 
-    public static CustomRsmCommand create(DataInputStream dis) throws IOException {
-        return new CustomRsmCommand(dis.readLong());
+    public static CustomRsmQuery create(DataInputStream dis) throws IOException {
+        return new CustomRsmQuery();
     }
 
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
-        if (o == null || getClass() != o.getClass()) return false;
-        final CustomRsmCommand that = (CustomRsmCommand) o;
-        return data == that.data;
+        return o != null && getClass() == o.getClass();
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(data);
+        return -1983176283;
     }
 }

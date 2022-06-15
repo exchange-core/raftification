@@ -17,25 +17,28 @@
 
 package exchange.core2.raftification.messages;
 
+import java.io.DataInputStream;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 
-public interface RpcMessage {
+public record NodeStatusRequest() implements RpcRequest {
 
-    int getMessageType();
+    @Override
+    public int getMessageType() {
+        return REQUEST_NODE_STATUS;
+    }
 
-    void serialize(ByteBuffer buffer);
+    @Override
+    public void serialize(ByteBuffer buffer) {
 
-    int REQUEST_APPEND_ENTRIES = 1;
-    int RESPONSE_APPEND_ENTRIES = -1;
+    }
 
-    int REQUEST_VOTE = 2;
-    int RESPONSE_VOTE = -2;
+    public static NodeStatusRequest create(final ByteBuffer buffer) {
+        return new NodeStatusRequest();
+    }
 
-    int REQUEST_NODE_STATUS = 8;
-    int RESPONSE_NODE_STATUS = -8;
+    public static NodeStatusRequest create(final DataInputStream dis) throws IOException {
 
-    int COMMAND_CUSTOM = 10;
-    int QUERY_CUSTOM = 11;
-    int RESPONSE_CUSTOM = -12;
-
+        return new NodeStatusRequest();
+    }
 }

@@ -15,10 +15,9 @@
  *
  */
 
-package exchange.core2.raftification.messages;
+package exchange.core2.raftification.demo;
 
-public interface RsmRequest extends SerializableMessage {
+import exchange.core2.raftification.messages.RsmQuery;
 
-
-
+public interface ICustomRsmQuery extends RsmQuery {
 }
