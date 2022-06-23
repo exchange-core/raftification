@@ -27,37 +27,41 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.SocketException;
 import java.nio.ByteBuffer;
-import java.util.LinkedList;
+import java.util.List;
 import java.util.Map;
-import java.util.Queue;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
-public class RpcClient<T extends RsmCommand, S extends RsmResponse> {
+public class RpcClient<C extends RsmCommand, Q extends RsmQuery, S extends RsmResponse> {
 
     private static final Logger logger = LoggerFactory.getLogger(RpcClient.class);
 
     private final AtomicLong correlationIdCounter = new AtomicLong(1L);
     private final Map<Long, CompletableFuture<RpcResponse>> futureMap = new ConcurrentHashMap<>();
-    private final Map<Integer, RaftUtils.RemoteUdpSocket> socketMap;
+    private final List<RaftUtils.RemoteUdpSocket> socketMap;
     private final RsmResponseFactory<S> msgFactory;
 
-    private volatile int leaderNodeId = 0;
+
+    private final List<RpcNodeReadinessRecord> nodesReadiness;
+
 
     private final DatagramSocket serverSocket;
 
     private volatile boolean active = true; // TODO implement
 
 
-    public RpcClient(final Map<Integer, String> remoteNodes,
+    public RpcClient(final List<String> remoteNodes,
                      final RsmResponseFactory<S> msgFactory) {
 
         this.socketMap = RaftUtils.createHostMap(remoteNodes);
         this.msgFactory = msgFactory;
+
+        // assume 0 is a leader initially and every node is ready
+        this.nodesReadiness = IntStream.range(0, 3)
+                .mapToObj(nodeId -> new RpcNodeReadinessRecord(nodeId, 0L, true, nodeId == 0))
+                .collect(Collectors.toCollection(CopyOnWriteArrayList::new));
 
         try {
             this.serverSocket = new DatagramSocket();
@@ -114,60 +118,68 @@ public class RpcClient<T extends RsmCommand, S extends RsmResponse> {
         serverSocket.close();
     }
 
-    public S callRpcSync(final T data, final int timeoutMs) throws TimeoutException {
+    public S callRpcSync(final C command, final int timeoutMs) throws TimeoutException {
 
-        final int leaderNodeIdInitial = leaderNodeId;
-        int leaderNodeIdLocal = leaderNodeIdInitial;
+        // Find initial leader. There is no strong consistency - use 0 by default (very small chance).
 
-        final Queue<Integer> remainingServers = socketMap.keySet().stream()
-                .filter(id -> id != leaderNodeIdInitial)
-                .collect(Collectors.toCollection(LinkedList::new));
+        RpcNodeReadinessRecord leader = nodesReadiness.stream()
+                .filter(node -> node.isLeader)
+                .findFirst()
+                .orElse(nodesReadiness.get(0));
 
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < 3; i++) {
 
             final long correlationId = correlationIdCounter.incrementAndGet();
             final CompletableFuture<RpcResponse> future = new CompletableFuture<>();
             futureMap.put(correlationId, future);
 
-            final CustomCommand<T> request = new CustomCommand<>(data);
+            final CustomCommand<C> request = new CustomCommand<>(command);
 
             // send request to last known leader
-            callRequest(request, leaderNodeIdLocal, correlationId);
+            callRequest(request, leader.nodeId, correlationId);
 
             try {
 
                 // block waiting for response
                 final CustomResponse<S> response = (CustomResponse<S>) future.get(timeoutMs, TimeUnit.MILLISECONDS);
 
+                // can be redirected
+                final int suggestedLeaderId = response.leaderNodeId();
+
+                if (suggestedLeaderId != leader.nodeId) {
+                    logger.info("Redirected to new leader {}->{}", leader.nodeId, suggestedLeaderId);
+
+                    final RpcNodeReadinessRecord suggestedLeader = nodesReadiness.get(suggestedLeaderId).asSuggestedLeader();
+                    nodesReadiness.set(suggestedLeaderId, suggestedLeader);
+                    leader = suggestedLeader;
+                }
+
                 if (response.success()) {
-
-                    // update only if changed (volatile write)
-                    if (leaderNodeIdInitial != leaderNodeIdLocal) {
-                        leaderNodeId = leaderNodeIdLocal;
-                    }
-
                     return response.rsmResponse();
-
-                } else {
-
-                    // can be redirected
-                    if (response.leaderNodeId() != leaderNodeIdLocal) {
-                        logger.info("Redirected to new leader {}->{}", leaderNodeIdLocal, response.leaderNodeId());
-                        leaderNodeIdLocal = response.leaderNodeId();
-                    }
                 }
 
             } catch (TimeoutException ex) {
 
-                logger.info("Timeout from " + leaderNodeIdLocal);
+                logger.info("Timeout from " + leader.nodeId);
 
-                final Integer nextNode = remainingServers.poll();
-                if (nextNode != null) {
-                    leaderNodeIdLocal = nextNode;
-                } else {
-                    throw ex;
+                nodesReadiness.set(leader.nodeId, leader.asFailedFollower(System.nanoTime()));
+
+                final int index = leader.nodeId != 2 ? leader.nodeId + 1 : 0;
+                logger.info("index={} list={}", index, nodesReadiness);
+                leader = nodesReadiness.get(index);
+
+                logger.info("Switched to {}", leader.nodeId);
+
+                // extra rotation if next leader is recently failed
+                if (!leader.isAlive) {
+                    long msSinceLastCheck = (System.nanoTime() - leader.lastTimeCheckedNs) / 1_000_000;
+                    if (msSinceLastCheck < 100) {
+                        leader = nodesReadiness.get(leader.nodeId != 2 ? leader.nodeId + 1 : 0);
+                        logger.info("Extra switched to {} (inactivity {}ms < 100ms)", leader.nodeId, msSinceLastCheck);
+                    } else {
+                        logger.info("Will try inactive node {}, as {}ms >= 100ms", leader.nodeId, msSinceLastCheck);
+                    }
                 }
-
 
             } catch (Exception ex) {
 
@@ -214,7 +226,9 @@ public class RpcClient<T extends RsmCommand, S extends RsmResponse> {
 
         final RaftUtils.RemoteUdpSocket remoteUdpSocket = socketMap.get(nodeId);
 
-        DatagramPacket packet = new DatagramPacket(data, length, remoteUdpSocket.address, remoteUdpSocket.port);
+        final DatagramPacket packet = new DatagramPacket(data, length, remoteUdpSocket.address, remoteUdpSocket.port);
+
+        logger.debug("SENDING to {} : {}", nodeId, PrintBufferUtil.hexDump(data, 0, length));
 
         try {
             serverSocket.send(packet);
@@ -224,5 +238,21 @@ public class RpcClient<T extends RsmCommand, S extends RsmResponse> {
         }
     }
 
+
+    private static record RpcNodeReadinessRecord(int nodeId,
+                                                 long lastTimeCheckedNs,
+                                                 boolean isAlive,
+                                                 boolean isLeader) {
+
+        RpcNodeReadinessRecord asSuggestedLeader() {
+            return new RpcNodeReadinessRecord(nodeId, lastTimeCheckedNs, isAlive, true);
+        }
+
+        RpcNodeReadinessRecord asFailedFollower(long timeNs) {
+            return new RpcNodeReadinessRecord(nodeId, timeNs, false, false);
+        }
+
+
+    }
 
 }

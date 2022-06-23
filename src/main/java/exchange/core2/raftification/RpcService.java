@@ -25,6 +25,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.net.*;
 import java.nio.ByteBuffer;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -36,7 +37,7 @@ public class RpcService<T extends RsmCommand, Q extends RsmQuery, S extends RsmR
 
     private final AtomicLong correlationIdCounter = new AtomicLong(1L);
     private final Map<Long, CompletableFuture<RpcResponse>> futureMap = new ConcurrentHashMap<>();
-    private final Map<Integer, RaftUtils.RemoteUdpSocket> socketMap;
+    private final List<RaftUtils.RemoteUdpSocket> socketMap;
     private final int serverPort;
     private final int serverNodeId;
     private final RpcHandler<T, Q, S> handler;
@@ -47,7 +48,7 @@ public class RpcService<T extends RsmCommand, Q extends RsmQuery, S extends RsmR
 
     private volatile boolean active = true;
 
-    public RpcService(Map<Integer, String> remoteNodes,
+    public RpcService(List<String> remoteNodes,
                       RpcHandler<T, Q, S> handler,
                       RsmRequestFactory<T, Q> requestFactory,
                       RsmResponseFactory<S> responseFactory,

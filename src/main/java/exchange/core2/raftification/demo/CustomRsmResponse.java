@@ -19,21 +19,25 @@ package exchange.core2.raftification.demo;
 
 import java.nio.ByteBuffer;
 
-public record CustomRsmResponse(int hash) implements ICustomRsmResponse {
+public record CustomRsmResponse(int hash, long lastData) implements ICustomRsmResponse {
 
     @Override
     public void serialize(ByteBuffer buffer) {
         buffer.putInt(hash);
+        buffer.putLong(lastData);
     }
 
     @Override
     public String toString() {
         return "CRR{" +
                 "hash=" + hash +
+                ", lastData=" + lastData +
                 '}';
     }
 
     public static CustomRsmResponse create(ByteBuffer buffer) {
-        return new CustomRsmResponse(buffer.getInt());
+        return new CustomRsmResponse(
+                buffer.getInt(),
+                buffer.getLong());
     }
 }

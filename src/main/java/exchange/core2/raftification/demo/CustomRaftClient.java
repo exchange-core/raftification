@@ -22,13 +22,12 @@ import exchange.core2.raftification.RpcClient;
 import exchange.core2.raftification.messages.NodeStatusRequest;
 import exchange.core2.raftification.messages.NodeStatusResponse;
 import exchange.core2.raftification.messages.RpcResponse;
-import org.agrona.collections.Hashing;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Collection;
 import java.util.List;
-import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -36,70 +35,98 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 public class CustomRaftClient {
 
     private static final Logger log = LoggerFactory.getLogger(CustomRaftClient.class);
 
-    private final Map<Integer, String> remoteNodes;
-    private final RpcClient<ICustomRsmCommand, ICustomRsmResponse> rpcClient;
+    private final List<String> remoteNodes;
+    private final RpcClient<ICustomRsmCommand, ICustomRsmQuery, ICustomRsmResponse> rpcClient;
 
     private final CustomRsm localRsm;
 
-    private int counter = 1;
-    private long val = 1_000_000L;
+    private long counter = 1L;
 
     public static void main(String[] args) throws InterruptedException {
 
 
         // localhost:3778, localhost:3779, localhost:3780
-        final Map<Integer, String> remoteNodes = Map.of(
-                0, "localhost:3778",
-                1, "localhost:3779",
-                2, "localhost:3780");
+        final List<String> remoteNodes = List.of(
+                "localhost:3778",
+                "localhost:3779",
+                "localhost:3780");
 
         final CustomRaftClient customRaftClient = new CustomRaftClient(remoteNodes);
 
-        customRaftClient.verifyClusterState();
+        customRaftClient.runTest();
+
+    }
+
+    public CustomRaftClient(final List<String> remoteNodes) {
+        this.remoteNodes = remoteNodes;
+        this.localRsm = new CustomRsm();
+
+        final CustomRsmFactory customRsmFactory = new CustomRsmFactory();
+
+        this.rpcClient = new RpcClient<>(remoteNodes, customRsmFactory);
+    }
+
+
+    public void runTest() throws InterruptedException {
+
+//        verifyClusterState();
+
+        final CustomRsmQuery query = new CustomRsmQuery();
 
 
         while (true) {
 
-            // raftClient.sendCommand();
 
+            log.info("send >>> {}", counter);
+
+            final CustomRsmCommand cmd = new CustomRsmCommand(counter);
+            final Optional<CustomRsmResponse> responseOpt = sendCommand(cmd);
+            log.info("recv <<< {}", responseOpt);
+
+            responseOpt.ifPresent(remoteRes -> {
+
+                final int localRes = localRsm.applyCommand(cmd).hash();
+
+                if (remoteRes.lastData() != counter) {
+                    log.warn("received counter {}, last sent {}", remoteRes.lastData(), counter);
+                    counter = remoteRes.lastData() + 1;
+
+                } else {
+
+                    counter++;
+
+                    if (localRes != remoteRes.hash()) {
+                        throw new IllegalStateException("Expected " + localRes + " but received " + remoteRes);
+                    }
+                }
+            });
 
             Thread.sleep(1000);
-            customRaftClient.verifyClusterState();
-            Thread.sleep(1000);
+//            customRaftClient.verifyClusterState();
+//            Thread.sleep(1000);
         }
     }
 
-    public CustomRaftClient(final Map<Integer, String> remoteNodes) {
-        this.remoteNodes = remoteNodes;
-        this.localRsm = new CustomRsm();
-        this.rpcClient = new RpcClient<>(remoteNodes, localRsm);
-    }
-
-
-    public boolean sendCommand(long data, int counter) {
+    public Optional<CustomRsmResponse> sendCommand(CustomRsmCommand cmd) {
         try {
-
-            log.info("send >>> {} data={}", counter, data);
-            final ICustomRsmResponse res = rpcClient.callRpcSync(new CustomRsmCommand(data), 500);
+            final ICustomRsmResponse res = rpcClient.callRpcSync(cmd, 100);
             if (res instanceof CustomRsmResponse res1) {
-                log.info("recv <<< hash={}", res1.hash());
+                return Optional.of(res1);
             } else {
                 throw new IllegalStateException("Unexpected response: " + res);
             }
-
-            counter++;
-            val = counter * 1_000_000L + (Hashing.hash(counter) % 1_000_000);
-
-            return true;
         } catch (Exception ex) {
+//            log.warn("Exception: {} {}", ex.getClass().getSimpleName(), ex.getMessage());
             log.warn("Exception: ", ex);
         }
-        return false;
+
+        return Optional.empty();
     }
 
     public boolean verifyClusterState() {
@@ -108,8 +135,8 @@ public class CustomRaftClient {
 
             log.debug("verifyClusterState: attempt={}", attempt);
 
-            final List<CompletableFuture<NodeStatusResponse>> futures = remoteNodes.keySet().stream()
-                    .map(nodeId -> (CompletableFuture<NodeStatusResponse>) rpcClient.callRpcAsync(nodeId, new NodeStatusRequest()))
+            final List<CompletableFuture<NodeStatusResponse>> futures = IntStream.range(0, 3)
+                    .mapToObj(nodeId -> (CompletableFuture<NodeStatusResponse>) rpcClient.callRpcAsync(nodeId, new NodeStatusRequest()))
                     .collect(Collectors.toList());
 
             CompletableFuture<NodeStatusResponse> firstLeaderFuture = firstMatching(futures, NodeStatusResponse::isLeader);

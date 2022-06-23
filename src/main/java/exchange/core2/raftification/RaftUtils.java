@@ -21,8 +21,8 @@ import exchange.core2.raftification.messages.*;
 
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.List;
+import java.util.stream.Collectors;
 
 public final class RaftUtils {
 
@@ -56,28 +56,23 @@ public final class RaftUtils {
         };
     }
 
-    public static Map<Integer, RemoteUdpSocket> createHostMap(final Map<Integer, String> remoteNodes) {
+    public static List<RemoteUdpSocket> createHostMap(final List<String> remoteNodes) {
 
-        final Map<Integer, RemoteUdpSocket> socketMap = new HashMap<>();
+        return remoteNodes.stream()
+                .map(address -> {
+                    try {
+                        final String[] split = address.split(":");
 
-        remoteNodes.forEach((id, address) -> {
+                        final InetAddress host = InetAddress.getByName(split[0]);
+                        final int port = Integer.parseInt(split[1]);
 
-            try {
-                final String[] split = address.split(":");
+                        return new RemoteUdpSocket(host, port);
 
-                final InetAddress host = InetAddress.getByName(split[0]);
-                final int port = Integer.parseInt(split[1]);
-
-                RemoteUdpSocket remoteUdpSocket = new RemoteUdpSocket(host, port);
-
-                socketMap.put(id, remoteUdpSocket);
-
-            } catch (Exception ex) {
-                throw new RuntimeException(ex);
-            }
-        });
-
-        return socketMap;
+                    } catch (Exception ex) {
+                        throw new RuntimeException(ex);
+                    }
+                })
+                .collect(Collectors.toList());
     }
 
 

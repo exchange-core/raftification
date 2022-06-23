@@ -22,6 +22,7 @@ import exchange.core2.raftification.repository.RaftDiskLogConfig;
 import exchange.core2.raftification.repository.RaftDiskLogRepository;
 
 import java.nio.file.Path;
+import java.util.List;
 
 public class CustomNode {
 
@@ -30,15 +31,22 @@ public class CustomNode {
         final int thisNodeId = Integer.parseInt(args[0]);
 
         final CustomRsm customRsm = new CustomRsm();
+        final CustomRsmFactory customRsmFactory = new CustomRsmFactory();
 
         final Path folder = Path.of("./raftlogs/node" + thisNodeId);
 
+        // localhost:3778, localhost:3779, localhost:3780
+        final List<String> remoteNodes = List.of(
+                "localhost:3778",
+                "localhost:3779",
+                "localhost:3780");
+
         final RaftDiskLogConfig raftDiskLogConfig = new RaftDiskLogConfig(folder, "EC2RT");
 
-        final RaftDiskLogRepository<ICustomRsmCommand> repository = new RaftDiskLogRepository<>(customRsm, raftDiskLogConfig);
+        final RaftDiskLogRepository<ICustomRsmCommand> repository = new RaftDiskLogRepository<>(customRsmFactory, raftDiskLogConfig);
 //        final IRaftLogRepository<CustomRsmCommand> repository = new RaftMemLogRepository<>();
 
-        new RaftNode<>(thisNodeId, repository, customRsm, customRsm, customRsm);
+        new RaftNode<>(remoteNodes, thisNodeId, repository, customRsm, customRsmFactory, customRsmFactory);
     }
 
 }

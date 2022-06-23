@@ -18,21 +18,11 @@
 package exchange.core2.raftification.demo;
 
 import exchange.core2.raftification.ReplicatedStateMachine;
-import exchange.core2.raftification.RsmRequestFactory;
-import exchange.core2.raftification.RsmResponseFactory;
 import net.openhft.chronicle.bytes.BytesOut;
 import org.agrona.collections.Hashing;
 
-import java.io.DataInputStream;
-import java.io.IOException;
-import java.nio.ByteBuffer;
-
 public class CustomRsm implements
-        ReplicatedStateMachine<ICustomRsmCommand, ICustomRsmQuery, ICustomRsmResponse>,
-        RsmRequestFactory<ICustomRsmCommand, ICustomRsmQuery>,
-        RsmResponseFactory<ICustomRsmResponse> {
-
-    public static final ICustomRsmResponse EMPTY_RSM_RESPONSE = new CustomRsmResponse(0);
+        ReplicatedStateMachine<ICustomRsmCommand, ICustomRsmQuery, ICustomRsmResponse> {
 
     // state
     private int hash = 0;
@@ -54,51 +44,23 @@ public class CustomRsm implements
 
         if (cmd instanceof CustomRsmCommand cmd1) {
 
-            hash = Hashing.hash(hash ^ Hashing.hash(cmd1.data()));
-            lastData = cmd1.data();
+            if (lastData + 1 == cmd1.data()) {
+                hash = Hashing.hash(hash ^ Hashing.hash(cmd1.data()));
+                lastData = cmd1.data();
+            }
         } else {
             throw new IllegalStateException("Unknown command " + cmd);
         }
 
-        return new CustomRsmResponse(hash);
+        return new CustomRsmResponse(hash, lastData);
     }
 
     @Override
     public ICustomRsmResponse applyQuery(ICustomRsmQuery query) {
         // can not change anything
-        return new CustomRsmResponse(hash);
+        return new CustomRsmResponse(hash, lastData);
     }
 
-    @Override
-    public CustomRsmCommand createCommand(ByteBuffer buffer) {
-        return CustomRsmCommand.create(buffer);
-    }
-
-    @Override
-    public CustomRsmCommand createCommand(DataInputStream dis) throws IOException {
-
-        return CustomRsmCommand.create(dis);
-    }
-
-    @Override
-    public ICustomRsmQuery createQuery(ByteBuffer buffer) {
-        return null;
-    }
-
-    @Override
-    public ICustomRsmQuery createQuery(DataInputStream dis) throws IOException {
-        return null;
-    }
-
-    @Override
-    public CustomRsmResponse createResponse(ByteBuffer buffer) {
-        return CustomRsmResponse.create(buffer);
-    }
-
-    @Override
-    public ICustomRsmResponse emptyResponse() {
-        return EMPTY_RSM_RESPONSE;
-    }
 
     @Override
     public void writeMarshallable(BytesOut bytes) {

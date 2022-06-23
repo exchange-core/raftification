@@ -27,7 +27,7 @@ import org.slf4j.LoggerFactory;
 import java.net.InetAddress;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
+import java.util.stream.IntStream;
 
 public class RaftNode<T extends RsmCommand, Q extends RsmQuery, S extends RsmResponse> {
 
@@ -96,22 +96,17 @@ public class RaftNode<T extends RsmCommand, Q extends RsmQuery, S extends RsmRes
     private long lastHeartBeatReceivedNs = System.nanoTime();
     private long electionEndNs = System.nanoTime();
 
-    public RaftNode(int thisNodeId,
+    public RaftNode(List<String> remoteNodes,
+                    int thisNodeId,
                     IRaftLogRepository<T> logRepository,
                     ReplicatedStateMachine<T, Q, S> rsm,
                     RsmRequestFactory<T, Q> msgFactory,
                     RsmResponseFactory<S> respFactory) {
 
-        // localhost:3778, localhost:3779, localhost:3780
-        final Map<Integer, String> remoteNodes = Map.of(
-                0, "localhost:3778",
-                1, "localhost:3779",
-                2, "localhost:3780");
-
         this.logRepository = logRepository;
         this.currentNodeId = thisNodeId;
         this.rsm = rsm;
-        this.otherNodes = remoteNodes.keySet().stream().mapToInt(x -> x).filter(nodeId -> nodeId != thisNodeId).toArray();
+        this.otherNodes = IntStream.range(0, 3).filter(nodeId -> nodeId != thisNodeId).toArray();
 
         final RpcHandler<T, Q, S> handler = new RpcHandler<>() {
             @Override
