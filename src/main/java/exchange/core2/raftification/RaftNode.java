@@ -181,12 +181,6 @@ public class RaftNode<T extends RsmCommand, Q extends RsmQuery, S extends RsmRes
 
                         resetFollowerAppendTimer();
 
-                        if (cmd.entries().isEmpty()) {
-                            return CmdRaftAppendEntriesResponse.createSuccess(logRepository.getCurrentTerm());
-                        }
-
-                        log.debug("Adding new records into the log...");
-
                         // 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
                         final long prevLogIndex = cmd.prevLogIndex();
                         final long localLastLogIndex = logRepository.getLastLogIndex();
@@ -201,18 +195,25 @@ public class RaftNode<T extends RsmCommand, Q extends RsmQuery, S extends RsmRes
                             return CmdRaftAppendEntriesResponse.createFailed(logRepository.getCurrentTerm(), localLastLogIndex);
                         }
 
-                        if (cmd.prevLogIndex() < lastApplied) {
-                            log.error("Already applied index {} to RSM, can not accept prevLogIndex={}", lastApplied, cmd.prevLogIndex());
+                        if (prevLogIndex < lastApplied) {
+                            log.error("Already applied index {} to RSM, can not accept prevLogIndex={}", lastApplied, prevLogIndex);
                             System.exit(-1); // TODO fix
                         }
+
+                        final List<RaftLogEntry<T>> entries = cmd.entries();
+
+                        if (entries.isEmpty()) {
+                            return CmdRaftAppendEntriesResponse.createSuccess(logRepository.getCurrentTerm());
+                        }
+
+                        log.debug("Adding new records into the log...");
 
                         // 3. If an existing entry conflicts with a new one (same index but different terms),
                         // delete the existing entry and all that follow it
                         // 4. Append any new entries not already in the log
-                        final List<RaftLogEntry<T>> entries = cmd.entries();
                         logRepository.appendOrOverride(entries, prevLogIndex);
 
-                        log.debug("Added to log repository: {}", cmd.entries());
+                        log.debug("Added to log repository: {}", entries);
 
                         // 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
                         if (cmd.leaderCommit() > commitIndex) {
@@ -247,8 +248,8 @@ public class RaftNode<T extends RsmCommand, Q extends RsmQuery, S extends RsmRes
                             switchToLeader();
                         }
                     } else if (resp instanceof final CmdRaftAppendEntriesResponse appendResponse) {
-                        if (correlationId == correlationIds[fromNodeId]) {
 
+                        if (correlationId == correlationIds[fromNodeId]) {
 
                             timeSent[fromNodeId] = 0L;
 
@@ -304,6 +305,9 @@ public class RaftNode<T extends RsmCommand, Q extends RsmQuery, S extends RsmRes
 
                             // notify worker thread to send updates to followers
                             rsm.notifyAll();
+
+                        }else{
+                            log.warn("Unexpected correlationId={} (should be correlationId[{}]={})", correlationId, fromNodeId, correlationIds[fromNodeId]);
                         }
                     }
                 }
@@ -349,10 +353,20 @@ public class RaftNode<T extends RsmCommand, Q extends RsmQuery, S extends RsmRes
 
             @Override
             public CustomResponse<S> handleClientQuery(InetAddress address, int port, long correlationId, CustomQuery<Q> query) {
+
                 synchronized (rsm) {
-                    // just apply query instantly
-                    final S result = rsm.applyQuery(query.rsmQuery());
-                    return new CustomResponse<>(result, logRepository.getVotedFor(), false);
+
+                    if (query.leaderOnly() && currentState != RaftNodeState.LEADER) {
+                        // can not execute - required to be a leader
+                        return new CustomResponse<>(respFactory.emptyResponse(), logRepository.getVotedFor(), false);
+                    } else {
+                        // just apply query instantly
+                        final Q query1 = query.rsmQuery();
+                        log.debug("query1: {}", query1);
+                        final S result = rsm.applyQuery(query1);
+                        log.debug("result: {}", result);
+                        return new CustomResponse<>(result, logRepository.getVotedFor(), true);
+                    }
                 }
             }
 
@@ -491,13 +505,11 @@ public class RaftNode<T extends RsmCommand, Q extends RsmQuery, S extends RsmRes
             final long corrId = rpcService.callRpcAsync(appendRequest, targetNodeId);
             log.info("Sent {} entries to {}: {} corrId={}", newEntries.size(), targetNodeId, appendRequest, corrId);
 
-            if (!newEntries.isEmpty()) {
-                correlationIds[targetNodeId] = corrId;
-                timeSent[targetNodeId] = System.nanoTime();
-                sentUpTo[targetNodeId] = nextIndexForNode - 1 + newEntries.size();
-                log.debug("correlationIds[{}]={}", targetNodeId, corrId);
-                log.debug("set sentUpTo[{}]={}", targetNodeId, sentUpTo[targetNodeId]);
-            }
+            correlationIds[targetNodeId] = corrId;
+            timeSent[targetNodeId] = System.nanoTime();
+            sentUpTo[targetNodeId] = nextIndexForNode - 1 + newEntries.size();
+            log.debug("correlationIds[{}]={}", targetNodeId, corrId);
+            log.debug("set sentUpTo[{}]={}", targetNodeId, sentUpTo[targetNodeId]);
 
             lastHeartBeatSentNs[targetNodeId] = System.nanoTime();
         }

@@ -20,13 +20,17 @@ package exchange.core2.raftification.demo;
 import exchange.core2.raftification.ReplicatedStateMachine;
 import net.openhft.chronicle.bytes.BytesOut;
 import org.agrona.collections.Hashing;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-public class CustomRsm implements
+public final class CustomRsm implements
         ReplicatedStateMachine<ICustomRsmCommand, ICustomRsmQuery, ICustomRsmResponse> {
 
+    private static final Logger log = LoggerFactory.getLogger(CustomRsm.class);
+
     // state
-    private int hash = 0;
-    private long lastData = 0L;
+    private int hash;
+    private long lastData;
 
     public CustomRsm() {
         this.hash = 0;
@@ -45,9 +49,18 @@ public class CustomRsm implements
         if (cmd instanceof CustomRsmCommand cmd1) {
 
             if (lastData + 1 == cmd1.data()) {
-                hash = Hashing.hash(hash ^ Hashing.hash(cmd1.data()));
+                final int newHash = Hashing.hash(hash ^ Hashing.hash(cmd1.data()));
+
+                log.debug("RSM: {}->{} hash: {}->{}", lastData, cmd1.data(), hash, newHash);
+
+                hash = newHash;
                 lastData = cmd1.data();
+            } else {
+
+                log.warn("RSM: Ignoreed {}->{}", lastData, cmd1.data());
+
             }
+
         } else {
             throw new IllegalStateException("Unknown command " + cmd);
         }
@@ -67,5 +80,13 @@ public class CustomRsm implements
 
         bytes.append(hash); // int
         bytes.append(lastData); // long
+    }
+
+    @Override
+    public String toString() {
+        return "CustomRsm{" +
+                "hash=" + hash +
+                ", lastData=" + lastData +
+                '}';
     }
 }

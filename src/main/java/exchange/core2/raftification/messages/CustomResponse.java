@@ -43,6 +43,10 @@ public record CustomResponse<S extends RsmResponse>(S rsmResponse,
         final boolean success = buffer.getInt() == 1;
         final S rsmResponse = factory.createResponse(buffer);
 
+        if (rsmResponse == null) {
+            throw new IllegalStateException("RsmResponse can not be null");
+        }
+
         return new CustomResponse<>(rsmResponse, leaderNodeId, success);
     }
 

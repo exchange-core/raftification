@@ -119,6 +119,8 @@ public class RpcService<T extends RsmCommand, Q extends RsmQuery, S extends RsmR
 
                     final RpcRequest msg = RaftUtils.createRequestByType(messageType, bb, requestFactory);
 
+                    logger.debug("msg: {}", msg);
+
                     if (msg instanceof CustomCommand msgCmd) {
                         // command from client
 
@@ -146,12 +148,16 @@ public class RpcService<T extends RsmCommand, Q extends RsmQuery, S extends RsmR
                         final InetAddress address = receivePacket.getAddress();
                         final int port = receivePacket.getPort();
 
+                        logger.debug("address:{} port:{}", address, port);
+
                         final CustomResponse<S> response =
                                 handler.handleClientQuery(
                                         address,
                                         port,
                                         correlationId,
                                         (CustomQuery<Q>) msgQ);
+
+                        logger.debug("response q: {}", response);
 
                         if (response != null) {
                             respondToClient(address, port, correlationId, response);
@@ -188,7 +194,9 @@ public class RpcService<T extends RsmCommand, Q extends RsmQuery, S extends RsmR
 
             } catch (final Exception ex) {
                 String message = PrintBufferUtil.hexDump(receivePacket.getData(), 0, receivePacket.getLength());
-                logger.error("Failed to process message from {}: {}", receivePacket.getAddress().getHostAddress(), message, ex);
+                final String hostAddress = receivePacket.getAddress().getHostAddress();
+                final int port = receivePacket.getPort();
+                logger.error("Failed to process message from {}:{} {}", hostAddress, port, message, ex);
             }
         }
 

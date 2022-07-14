@@ -27,10 +27,12 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.SocketException;
 import java.nio.ByteBuffer;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -93,7 +95,7 @@ public class RpcClient<C extends RsmCommand, Q extends RsmQuery, S extends RsmRe
 
                 final long correlationId = bb.getLong();
 
-                logger.debug("RECEIVED from {} (c={}): {}", receivePacket.getAddress(), correlationId, PrintBufferUtil.hexDump(receivePacket.getData(), 0, receivePacket.getLength()));
+                logger.debug("RECEIVED from {}:{} (crl={}): {}", receivePacket.getAddress(), receivePacket.getPort(), correlationId, PrintBufferUtil.hexDump(receivePacket.getData(), 0, receivePacket.getLength()));
 
                 final CompletableFuture<RpcResponse> future = futureMap.remove(correlationId);
                 if (future != null) {
@@ -118,7 +120,7 @@ public class RpcClient<C extends RsmCommand, Q extends RsmQuery, S extends RsmRe
         serverSocket.close();
     }
 
-    public S callRpcSync(final C command, final int timeoutMs) throws TimeoutException {
+    public S sendCommandSync(final C command, final int timeoutMs) throws TimeoutException {
 
         // Find initial leader. There is no strong consistency - use 0 by default (very small chance).
 
@@ -149,9 +151,10 @@ public class RpcClient<C extends RsmCommand, Q extends RsmQuery, S extends RsmRe
                 if (suggestedLeaderId != leader.nodeId) {
                     logger.info("Redirected to new leader {}->{}", leader.nodeId, suggestedLeaderId);
 
-                    final RpcNodeReadinessRecord suggestedLeader = nodesReadiness.get(suggestedLeaderId).asSuggestedLeader();
-                    nodesReadiness.set(suggestedLeaderId, suggestedLeader);
-                    leader = suggestedLeader;
+                    updateNodeRecord(suggestedLeaderId, RpcNodeReadinessRecord::asSuggestedLeader);
+
+                    // switch to suggested leader
+                    leader = updateNodeRecord(suggestedLeaderId, RpcNodeReadinessRecord::asSuggestedLeader);
                 }
 
                 if (response.success()) {
@@ -193,6 +196,59 @@ public class RpcClient<C extends RsmCommand, Q extends RsmQuery, S extends RsmRe
 
         throw new TimeoutException();
     }
+
+    public S sendQuerySync(final Q query, final int timeoutMs, boolean leaderOnly) throws TimeoutException {
+
+        final List<RpcNodeReadinessRecord> nodesToRequest = nodesReadiness.stream()
+                .sorted(leaderOnly ? LEADER_FIRST_COMPARATOR : FOLLOWER_FIRST_COMPARATOR)
+                .collect(Collectors.toList());
+
+        logger.debug("sending to nodes: {}", nodesToRequest.stream().mapToInt(RpcNodeReadinessRecord::nodeId).toArray());
+
+
+        for (RpcNodeReadinessRecord node : nodesToRequest) {
+
+            logger.debug("sending to node: {}", node);
+
+            final long correlationId = correlationIdCounter.incrementAndGet();
+            final CompletableFuture<RpcResponse> future = new CompletableFuture<>();
+            futureMap.put(correlationId, future);
+
+            final CustomQuery<Q> request = new CustomQuery<>(query, leaderOnly);
+
+            // send request to the candidate node
+            callRequest(request, node.nodeId, correlationId);
+
+            try {
+
+                // block waiting for response
+                final CustomResponse<S> response = (CustomResponse<S>) future.get(timeoutMs, TimeUnit.MILLISECONDS);
+
+                if (response.success()) { // TODO response can be unsuccessful if expiration criteria was not met
+                    return response.rsmResponse();
+                } else {
+                    logger.debug("response was not successful");
+                }
+
+            } catch (TimeoutException ex) {
+
+                logger.info("Timeout from " + node.nodeId);
+
+                updateNodeRecord(node.nodeId, node1 -> node1.asFailedFollower(System.nanoTime()));
+
+            } catch (Exception ex) {
+
+                logger.info("Request failed ({})", ex.getMessage());
+                throw new RuntimeException(ex);
+            } finally {
+                // double-check if correlationId removed
+                futureMap.remove(correlationId);
+            }
+        }
+
+        throw new TimeoutException(); // TODO not always timeout
+    }
+
 
     public CompletableFuture<? extends RpcResponse> callRpcAsync(final int nodeId,
                                                                  final RpcRequest request) {
@@ -239,6 +295,13 @@ public class RpcClient<C extends RsmCommand, Q extends RsmQuery, S extends RsmRe
     }
 
 
+    private RpcNodeReadinessRecord updateNodeRecord(int nodeId, UnaryOperator<RpcNodeReadinessRecord> operator) {
+        final RpcNodeReadinessRecord oldRecord = nodesReadiness.get(nodeId);
+        final RpcNodeReadinessRecord newRecord = operator.apply(oldRecord);
+        nodesReadiness.set(nodeId, newRecord);
+        return newRecord;
+    }
+
     private static record RpcNodeReadinessRecord(int nodeId,
                                                  long lastTimeCheckedNs,
                                                  boolean isAlive,
@@ -253,6 +316,54 @@ public class RpcClient<C extends RsmCommand, Q extends RsmQuery, S extends RsmRe
         }
 
 
+        RpcNodeReadinessRecord updateCall(long timeNs) {
+            return new RpcNodeReadinessRecord(nodeId, timeNs, isAlive, isLeader);
+        }
     }
+
+
+    private static final Comparator<RpcNodeReadinessRecord> FOLLOWER_FIRST_COMPARATOR = (node1, node2) -> {
+
+        if (node1.isAlive() != node2.isAlive()) {
+            // prefer alive nodes
+            return node1.isAlive() ? -1 : 1;
+        }
+
+        if (node1.isLeader() != node2.isLeader()) {
+            // prefer non-leader
+            return node1.isLeader() ? 1 : -1;
+        }
+
+        if (node1.lastTimeCheckedNs() != node2.lastTimeCheckedNs()) {
+            // prefer the one did not use last time (round-robin)
+            return node1.lastTimeCheckedNs() < node2.lastTimeCheckedNs() ? -1 : 1;
+        }
+
+        // sort by nodeId (unlikely to happen)
+        return node1.nodeId() - node2.nodeId();
+
+    };
+
+    private static final Comparator<RpcNodeReadinessRecord> LEADER_FIRST_COMPARATOR = (node1, node2) -> {
+
+        if (node1.isAlive() != node2.isAlive()) {
+            // prefer alive nodes
+            return node1.isAlive() ? -1 : 1;
+        }
+
+        if (node1.isLeader() != node2.isLeader()) {
+            // prefer leader
+            return node1.isLeader() ? -1 : 1;
+        }
+
+        if (node1.lastTimeCheckedNs() != node2.lastTimeCheckedNs()) {
+            // prefer the one was used previous time (unlikely to happen)
+            return node1.lastTimeCheckedNs() > node2.lastTimeCheckedNs() ? -1 : 1;
+        }
+
+        // sort by nodeId (unlikely to happen)
+        return node1.nodeId() - node2.nodeId();
+
+    };
 
 }

@@ -41,12 +41,8 @@ public class CustomRaftClient {
 
     private static final Logger log = LoggerFactory.getLogger(CustomRaftClient.class);
 
-    private final List<String> remoteNodes;
     private final RpcClient<ICustomRsmCommand, ICustomRsmQuery, ICustomRsmResponse> rpcClient;
 
-    private final CustomRsm localRsm;
-
-    private long counter = 1L;
 
     public static void main(String[] args) throws InterruptedException {
 
@@ -64,8 +60,6 @@ public class CustomRaftClient {
     }
 
     public CustomRaftClient(final List<String> remoteNodes) {
-        this.remoteNodes = remoteNodes;
-        this.localRsm = new CustomRsm();
 
         final CustomRsmFactory customRsmFactory = new CustomRsmFactory();
 
@@ -79,33 +73,41 @@ public class CustomRaftClient {
 
         final CustomRsmQuery query = new CustomRsmQuery();
 
+        final CustomRsmResponse initialState = requestInitialState(query);
+
+        final CustomRsm localRsm = new CustomRsm(initialState.hash(), initialState.lastData());
+
+        long nextData = initialState.lastData() + 1L;
 
         while (true) {
 
 
-            log.info("send >>> {}", counter);
+            log.info("send >>> {}", nextData);
 
-            final CustomRsmCommand cmd = new CustomRsmCommand(counter);
+            final CustomRsmCommand cmd = new CustomRsmCommand(nextData);
             final Optional<CustomRsmResponse> responseOpt = sendCommand(cmd);
             log.info("recv <<< {}", responseOpt);
 
-            responseOpt.ifPresent(remoteRes -> {
+            if (responseOpt.isPresent()) {
+
+                final CustomRsmResponse remoteRes = responseOpt.get();
 
                 final int localRes = localRsm.applyCommand(cmd).hash();
 
-                if (remoteRes.lastData() != counter) {
-                    log.warn("received counter {}, last sent {}", remoteRes.lastData(), counter);
-                    counter = remoteRes.lastData() + 1;
+                if (remoteRes.lastData() != nextData) {
+                    log.warn("Correction: received counter {}, last sent {} -> updating nextData to {}", remoteRes.lastData(), nextData, remoteRes.lastData() + 1);
+                    nextData = remoteRes.lastData() + 1;
 
                 } else {
 
-                    counter++;
-
                     if (localRes != remoteRes.hash()) {
                         throw new IllegalStateException("Expected " + localRes + " but received " + remoteRes);
+                    } else {
+                        nextData++;
+
                     }
                 }
-            });
+            }
 
             Thread.sleep(1000);
 //            customRaftClient.verifyClusterState();
@@ -113,9 +115,30 @@ public class CustomRaftClient {
         }
     }
 
+    private CustomRsmResponse requestInitialState(CustomRsmQuery query) throws InterruptedException {
+
+        while (true) {
+
+            log.info("send q >>> {}", query);
+
+            // sending query to leader
+            final Optional<CustomRsmResponse> responseOpt = sendQuery(query, true);
+            log.info("recv q <<< {}", responseOpt);
+
+            if (responseOpt.isPresent()) {
+
+                final CustomRsmResponse response = responseOpt.get();
+                log.debug("initialize local state with {}", response);
+                return response;
+            }
+
+            Thread.sleep(1000);
+        }
+    }
+
     public Optional<CustomRsmResponse> sendCommand(CustomRsmCommand cmd) {
         try {
-            final ICustomRsmResponse res = rpcClient.callRpcSync(cmd, 100);
+            final ICustomRsmResponse res = rpcClient.sendCommandSync(cmd, 100);
             if (res instanceof CustomRsmResponse res1) {
                 return Optional.of(res1);
             } else {
@@ -123,11 +146,29 @@ public class CustomRaftClient {
             }
         } catch (Exception ex) {
 //            log.warn("Exception: {} {}", ex.getClass().getSimpleName(), ex.getMessage());
-            log.warn("Exception: ", ex);
+            log.warn("Command exception: ", ex);
         }
 
         return Optional.empty();
     }
+
+
+    public Optional<CustomRsmResponse> sendQuery(CustomRsmQuery query, boolean leaderOnly) {
+        try {
+            final ICustomRsmResponse res = rpcClient.sendQuerySync(query, 100, leaderOnly);
+            if (res instanceof CustomRsmResponse res1) {
+                return Optional.of(res1);
+            } else {
+                throw new IllegalStateException("Unexpected response: " + res);
+            }
+        } catch (Exception ex) {
+//            log.warn("Exception: {} {}", ex.getClass().getSimpleName(), ex.getMessage());
+            log.warn("Query exception: ", ex);
+        }
+
+        return Optional.empty();
+    }
+
 
     public boolean verifyClusterState() {
 
